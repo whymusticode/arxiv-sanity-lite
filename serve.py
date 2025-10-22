@@ -10,6 +10,7 @@ ideas:
 import os
 import re
 import time
+import subprocess
 from random import shuffle
 
 import numpy as np
@@ -47,19 +48,19 @@ def get_tags():
     if g.user is None:
         return {}
     if not hasattr(g, '_tags'):
-        with get_tags_db() as tags_db:
+        with get_tags_db(flag='c') as tags_db:
             tags_dict = tags_db[g.user] if g.user in tags_db else {}
         g._tags = tags_dict
     return g._tags
 
 def get_papers():
     if not hasattr(g, '_pdb'):
-        g._pdb = get_papers_db()
+        g._pdb = get_papers_db(flag='c')
     return g._pdb
 
 def get_metas():
     if not hasattr(g, '_mdb'):
-        g._mdb = get_metas_db()
+        g._mdb = get_metas_db(flag='c')
     return g._mdb
 
 @app.before_request
@@ -335,7 +336,7 @@ def inspect():
 @app.route('/profile')
 def profile():
     context = default_context()
-    with get_email_db() as edb:
+    with get_email_db(flag='c') as edb:
         email = edb.get(g.user, '')
         context['email'] = email
     return render_template('profile.html', **context)
@@ -457,6 +458,33 @@ def delete_tag(tag=None):
     print("deleted tag %s for user %s" % (tag, g.user))
     return "ok: " + str(d) # return back the user library for debugging atm
 
+@app.route('/analyze/<pid>')
+def analyze(pid):
+    """
+    Trigger Claude API analysis of a paper
+    Output goes to the terminal where flask is running
+    """
+    print(f"\n{'='*80}")
+    print(f"ANALYZING PAPER: {pid}")
+    print(f"{'='*80}\n")
+
+    try:
+        # Run the analyze_paper.py script
+        result = subprocess.run(
+            ['python3', 'analyze_paper.py', pid],
+            capture_output=False,  # Let output go to terminal
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+
+        if result.returncode == 0:
+            return "ok: analysis printed to terminal"
+        else:
+            return f"error: script failed with code {result.returncode}"
+    except Exception as e:
+        print(f"Error running analysis: {e}")
+        return f"error: {str(e)}"
+
 # -----------------------------------------------------------------------------
 # endpoints to log in and out
 
@@ -464,8 +492,8 @@ def delete_tag(tag=None):
 def login():
 
     # the user is logged out but wants to log in, ok
-    if g.user is None and request.form['username']:
-        username = request.form['username']
+    username = request.form.get('username', '')
+    if g.user is None and username:
         if len(username) > 0: # one more paranoid check
             session['user'] = username
 

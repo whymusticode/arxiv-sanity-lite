@@ -1,0 +1,9 @@
+
+
+import requests
+
+url = "https://arxiv.org/html/2510.14981v1"
+response = requests.get(url)
+content = response.text
+
+https://arxiv.org/html/2510.18876v1  summarize this paper. Does it have code that can be downloaded and ran? What kinds of things can be built with what they accomplished? How did they test their idea and what did it demonstrate 

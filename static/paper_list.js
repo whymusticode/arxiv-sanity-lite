@@ -19,6 +19,12 @@ const Paper = props => {
                         .then(response => console.log(response.text()));
     const subber = () => fetch("/sub/" + p.id + "/" + prompt("tag to subtract from this paper:"))
                         .then(response => console.log(response.text()));
+    const analyzer = () => {
+        console.log("Analyzing paper " + p.id + " with Claude...");
+        fetch("/analyze/" + p.id)
+            .then(response => response.text())
+            .then(text => console.log(text));
+    };
     const utags = p.utags.map((utxt, ix) => <UTag key={ix} tag={utxt} />);
     const similar_url = "/?rank=pid&pid=" + p.id;
     const inspect_url = "/inspect?pid=" + p.id;
@@ -47,6 +53,7 @@ const Paper = props => {
         <div class='rel_abs'>{p.summary}</div>
         <div class='rel_more'><a href={similar_url}>similar</a></div>
         <div class='rel_inspect'><a href={inspect_url}>inspect</a></div>
+        <div class='rel_analyze'><a href="javascript:void(0)" onClick={analyzer}>analyze</a></div>
     </div>
     )
 }
