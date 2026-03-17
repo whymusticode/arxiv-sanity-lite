@@ -2,7 +2,7 @@
   description = "arxiv-sanity-lite";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -18,22 +18,6 @@
             pkgs.python311Packages.pip
             pkgs.python311Packages.virtualenv
           ];
-
-          shellHook = ''
-            if [ ! -d .venv ]; then
-              echo "Creating venv..."
-              python -m venv .venv
-            fi
-            source .venv/bin/activate
-
-            if [ ! -f .venv/.installed ]; then
-              echo "Installing dependencies..."
-              pip install -q -r requirements.txt
-              touch .venv/.installed
-            fi
-
-            echo "arxiv-sanity-lite ready"
-          '';
         };
       }
     );
