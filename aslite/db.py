@@ -129,6 +129,11 @@ def get_email_db(flag='r', autocommit=True):
     edb = SqliteDict(DICT_DB_FILE, tablename='email', flag=flag, autocommit=autocommit)
     return edb
 
+def get_read_db(flag='r', autocommit=True):
+    assert flag in ['r', 'c']
+    rdb = SqliteDict(DICT_DB_FILE, tablename='read_papers', flag=flag, autocommit=autocommit)
+    return rdb
+
 # -----------------------------------------------------------------------------
 """
 our "feature store" is currently just a pickle file, may want to consider hdf5 in the future

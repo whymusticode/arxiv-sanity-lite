@@ -9,6 +9,7 @@ ideas:
 
 import os
 import re
+import sys
 import time
 import subprocess
 from random import shuffle
@@ -21,7 +22,7 @@ from flask import render_template
 from flask import g # global session-level object
 from flask import session
 
-from aslite.db import get_papers_db, get_metas_db, get_tags_db, get_last_active_db, get_email_db
+from aslite.db import get_papers_db, get_metas_db, get_tags_db, get_last_active_db, get_email_db, get_read_db
 from aslite.db import load_features
 
 # -----------------------------------------------------------------------------
@@ -52,6 +53,15 @@ def get_tags():
             tags_dict = tags_db[g.user] if g.user in tags_db else {}
         g._tags = tags_dict
     return g._tags
+
+def get_read_papers():
+    if g.user is None:
+        return set()
+    if not hasattr(g, '_read'):
+        with get_read_db(flag='c') as read_db:
+            read_set = read_db[g.user] if g.user in read_db else set()
+        g._read = read_set
+    return g._read
 
 def get_papers():
     if not hasattr(g, '_pdb'):
@@ -88,6 +98,7 @@ def render_pid(pid):
     # render a single paper with just the information we need for the UI
     pdb = get_papers()
     tags = get_tags()
+    read_papers = get_read_papers()
     thumb_path = 'static/thumb/' + pid + '.jpg'
     thumb_url = thumb_path if os.path.isfile(thumb_path) else ''
     d = pdb[pid]
@@ -101,6 +112,7 @@ def render_pid(pid):
         utags = [t for t, pids in tags.items() if pid in pids],
         summary = d['summary'],
         thumb_url = thumb_url,
+        is_read = pid in read_papers,
     )
 
 def random_rank():
@@ -458,6 +470,35 @@ def delete_tag(tag=None):
     print("deleted tag %s for user %s" % (tag, g.user))
     return "ok: " + str(d) # return back the user library for debugging atm
 
+@app.route('/read/<pid>')
+def mark_read(pid):
+    """Mark a paper as read"""
+    if g.user is None:
+        return "error, not logged in"
+
+    with get_read_db(flag='c') as read_db:
+        read_set = read_db[g.user] if g.user in read_db else set()
+        read_set.add(pid)
+        read_db[g.user] = read_set
+
+    print(f"marked paper {pid} as read for user {g.user}")
+    return "ok: marked as read"
+
+@app.route('/unread/<pid>')
+def mark_unread(pid):
+    """Mark a paper as unread"""
+    if g.user is None:
+        return "error, not logged in"
+
+    with get_read_db(flag='c') as read_db:
+        read_set = read_db[g.user] if g.user in read_db else set()
+        if pid in read_set:
+            read_set.remove(pid)
+            read_db[g.user] = read_set
+
+    print(f"marked paper {pid} as unread for user {g.user}")
+    return "ok: marked as unread"
+
 @app.route('/analyze/<pid>')
 def analyze(pid):
     """
@@ -483,6 +524,50 @@ def analyze(pid):
             return f"error: script failed with code {result.returncode}"
     except Exception as e:
         print(f"Error running analysis: {e}")
+        return f"error: {str(e)}"
+
+@app.route('/preprocess/<pid>')
+def preprocess(pid):
+    """
+    Intelligently preprocess a paper for LLM analysis.
+    Removes cruft and reduces token count while preserving informative content.
+    Output saved to file in project root.
+    """
+    # Get optional target_tokens from query param (default 200k)
+    target_tokens = request.args.get('tokens', '200000')
+    try:
+        target_tokens = int(target_tokens)
+    except ValueError:
+        target_tokens = 200000
+
+    print(f"\n{'='*80}")
+    print(f"PREPROCESSING PAPER: {pid} (target: {target_tokens} tokens)")
+    print(f"{'='*80}\n")
+
+    try:
+        # Build command
+        cmd = ['python3', 'summarize_paper.py', pid, str(target_tokens)]
+
+        # Run the summarize_paper.py script
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+
+        # Print output to terminal
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+
+        if result.returncode == 0:
+            return f"ok: clean_{pid}.txt and preprocessed_{pid}.txt"
+        else:
+            return f"error: script failed with code {result.returncode}"
+    except Exception as e:
+        print(f"Error preprocessing: {e}")
         return f"error: {str(e)}"
 
 # -----------------------------------------------------------------------------

@@ -1,0 +1,515 @@
+Paper: 2512.01565
+Original HTML size: 654820 chars
+Final token count: 23686
+Steps applied: cruft_removal
+================================================================================
+
+
+
+=== Deep FlexQP: Accelerated Nonlinear Programming via Deep Unfolding ===
+
+We propose an always-feasible quadratic programming (QP) optimizer, FlexQP , which is based on an exact relaxation of the QP constraints.
+If the original constraints are feasible, then the optimizer finds the optimal solution to the original QP.
+On the other hand, if the constraints are infeasible, the optimizer identifies a solution that minimizes the constraint violation in a sparse manner.
+FlexQP scales favorably with respect to the problem dimension, is robust to both feasible and infeasible QPs with minimal assumptions on the problem data, and can be effectively warm-started.
+We subsequently apply deep unfolding to improve our optimizer through data-driven techniques, leading to an accelerated Deep FlexQP .
+By learning dimension-agnostic feedback policies for the parameters from a small number of training examples, Deep FlexQP generalizes to problems with larger dimensions and can optimize for many more iterations than it was initially trained for.
+Our approach outperforms two recently proposed state-of-the-art accelerated QP approaches on a suite of benchmark systems including portfolio optimization, classification, and regression problems.
+We provide guarantees on the expected performance of our deep QP optimizer through probably approximately correct (PAC) Bayes generalization bounds.
+These certificates are used to design an accelerated sequential quadratic programming solver that solves nonlinear optimal control and predictive safety filter problems faster than traditional approaches.
+Overall, our approach is very robust and greatly outperforms existing non-learning and learning-based optimizers in terms of both runtime and convergence to the optimal solution across multiple classes of NLPs.
+
+
+=== 1 Introduction ===
+
+Nonlinear programming (NLP) is a key technique for both large-scale decision making, where difficulty arises due to the sheer number of variables and constraints, as well as real-time embedded systems, which need to solve many NLPs with similar structure quickly and robustly.
+Within NLP, quadratic programming (QP) plays a fundamental role as many real-world problems in optimal control ( anderson2007optimal ) , portfolio optimization ( markowitz1952portfolio ; boyd2013performance ; boyd2017multi ) , and machine learning ( huber1964robust ; cortes1995support ; tibshirani1996regression ; candes2008enhancing ) can be represented as QPs.
+Furthermore, sequential quadratic programming (SQP) methods utilize QP as a submodule to solve much more complicated problems where the objective and constraints may be nonlinear and non-convex, such as in nonlinear model predictive control ( diehl2009efficient ; rawlings2020model ) , state estimation ( aravkin2017generalized ) , and power grid optimization ( montoya2019sequential ) .
+SQP itself can even be used as a subproblem for solving mixed integer NLPs ( leyffer2001integrating ) and large-scale partial differential equations ( fang2023sqp ) .
+However, a common difficulty with SQP methods occurs when the linearization of the constraints results in an infeasible QP subproblem, and a large amount of research has focused on how to repair or avoid these infeasibilities, e.g., ( fletcher1985l1 ; izmailov2012stabilized ) , among others.
+A significant advantage of SNOPT ( gill2005snopt ) , one of the most well-known SQP-based methods, is in its infeasibility detection and reduction handling.
+These considerations necessitate a fast yet robust QP solver that works under minimal assumptions on the problem parameters.
+To this end, we propose FlexQP , a flexible QP solver that is always-feasible, meaning that it can solve any QP regardless of the feasibility of the constraints.
+Our method is based on an exact relaxation of the QP constraints: if the original QP was feasible, then FlexQP will identify the optimal solution.
+On the other hand, if the original QP was infeasible, instead of erroring or failing to return a solution, FlexQP automatically identifies the infeasibilities while simultaneously finding a point that minimizes the constraint violation.
+This allows FlexQP to be a robust QP solver in and of itself, but its power shines when used a submodule in an SQP-type method, see Figure 1 .
+Figure 1 : SQP with Deep FlexQP can solve highly-constrained nonlinear optimizations over 15x faster than SQP with OSQP (averaged over 100 problems).
+Moreover, through the relaxation of the constraints, multiple hyperparameters are introduced that can be difficult to tune and have a non-intuitive effect on the optimization.
+To address this shortcoming, we use deep unfolding ( monga2021algorithm ) to design lightweight feedback policies for the parameters based on actual problem data and solutions for QP problems of interest, leading to an accelerated version titled Deep FlexQP .
+Learning the parameters in a data-driven fashion avoids the laborious process of tuning them by hand or designing heuristics for how they should be updated from one iteration to the next. Meanwhile, these data-driven rules have been shown to strongly outperform the hand-crafted ones, such as in the works by ichnowski2021accelerating and saravanos2025deep .
+We thoroughly benchmark Deep FlexQP against traditional and learned QP optimizers on multiple QP problem classes including machine learning, portfolio optimization, and optimal control problems.
+Moreover, we certify the performance of Deep FlexQP through probably approximately correct (PAC) Bayes generalization bounds, which provide a guarantee on the mean performance of the optimizer.
+We propose a log-scaled training loss that better captures the performance of the optimizer when the residuals are very small.
+Finally, we deploy Deep FlexQP to solve nonlinearly-constrained trajectory optimization and predictive safety filter problems ( wabersich2021predictive ) .
+Overall, Deep FlexQP can produce an order-of-magnitude speedup over OSQP ( stellato2020osqp ) when deployed as a subroutine in an SQP-based approach ( Figure 1 ), while also robustly handling infeasibilities that may occur due to a poor linearization or an over-constrained problem.
+
+
+=== 2 Motivation & Related Work ===
+
+SQP solves smooth nonlinear optimization problems of the form
+where f : ℝ n → ℝ f:\mathbb{R}^{n}\to\mathbb{R} twice-differentiable is the objective to be minimized and g : ℝ n → ℝ m g:\mathbb{R}^{n}\to\mathbb{R}^{m} and h : ℝ n → ℝ p h:\mathbb{R}^{n}\to\mathbb{R}^{p} differentiable describe the inequality and equality constraints, respectively.
+SQP solves Equation 1 by iteratively linearizing the constraints and quadraticizing the Lagrangian ℒ ​ ( x , y I , y E ) := f ​ ( x ) + y I ⊤ ​ g ​ ( x ) + y E ⊤ ​ h ​ ( x ) \mathcal{L}(x,y_{I},y_{E})\vcentcolon=f(x)+y_{I}^{\top}g(x)+y_{E}^{\top}h(x) around the current iterate ( x k , y I k , y E k ) (x^{k},y_{I}^{k},y_{E}^{k}) , where y I ∈ ℝ + m y_{I}\in\mathbb{R}^{m}_{+} and y E ∈ ℝ p y_{E}\in\mathbb{R}^{p} are the dual variables for the inequality and equality constraints, respectively.
+This results in the following QP subproblem:
+Notably, the linearization of the constraints g g and h h may not produce a QP subproblem that is feasible, meaning that there may not exist any d ​ x dx that satisfies the linearized constraints Equations 2b and 2c .
+In this case, the SQP solver either terminates with a suboptimal point or a specialized routine needs to be run in order to reduce the infeasibility.
+For example, when SNOPT encounters an infeasible subproblem, it enters elastic mode and solves a new optimization where the constraints are relaxed using ℓ 1 \ell_{1} penalty functions ( gill2005snopt ) .
+This is advantageous over other choices, such as an ℓ 2 \ell_{2} penalty, as the ℓ 1 \ell_{1} norm encourages sparsity in the constraint violation.
+This means the optimizer can naturally identify the constraints that are the most difficult to satisfy.
+Similarly, stabilized SQP methods attempt to regularize the constraints at every step, but this requires determining a suitable regularization through another process ( wright1998superlinear ; hager1999stabilized ) . In the context of mixed integer NLPs, infeasibilities are very likely to occur during the branch and bound process, so their fast and robust identification is crucial ( gill2011sequential ) .
+Moreover, as the interest in data-driven optimization grows, we often wish to solve many optimization problems with similar structure repeatedly ( amos2023tutorial ) , and potentially in parallel or in a batched fashion, such as in the method by fang2023sqp , which requires solving coupled systems of SQP problems in parallel. Needing to run specialized procedures in these cases is not scalable. Furthermore, identifying the best hyperparameters for each individual optimization problem is difficult and time consuming.
+Deep unfolding is a learning-to-optimize approach ( chen2022learning ) that has roots in the signal and image processing domains ( gregor2010ista ; wang2015deep ) and utilizes data-driven machine learning to reduce the cost of hyperparameter tuning and to accelerate convergence of model-based optimizers ( monga2021algorithm ) . It constitutes the state-of-the-art approach for sparse recovery ( liu2019alista ) and video reconstruction ( deweerdt2024transformer ) . In the context of NLP, deep unfolding has been recently applied to accelerate QPs. saravanos2025deep use an analogy to closed-loop control and learn feedback policies for the parameters of a deep-unfolded variant of the operator splitting QP (OSQP) solver ( stellato2020osqp ) , which is a first-order method based on the alternating direction method of multipliers (ADMM) ( boyd2011distributed ) . Their method can achieve orders-of-magnitude improvement in wall-clock time compared to OSQP, and they also propose a decentralized version for quickly solving QPs with distributed structure. Their idea is similar in vein to that of ichnowski2021accelerating , who use reinforcement learning to train a policy that outputs the optimal parameters for OSQP, with the goals of accelerating the optimizer. Another related approach learns to warm-start a Douglas-Rachford splitting QP solver, with the goal of improving convergence speed ( sambharya2023end ) .
+Based on these considerations, in Section 3 we propose a QP optimizer, FlexQP, that robustly handles infeasible QPs in a unified manner. We subsequently apply deep unfolding in Section 4 , leading to a data-accelerated variant, Deep FlexQP, that outperforms traditional optimization on multiple classes of NLP problems ( Figures 1 and 5 ).
+
+
+=== 3 FlexQP: An Always-Feasible Quadratic Programming Solver ===
+
+Our proposed QP solver, FlexQP, transforms the QP constraints using an exact relaxation and then solves the resultant problem using an operator splitting inspired by OSQP ( stellato2020osqp ) .
+We will assume the reader is familiar with ADMM; a good overview is provided by boyd2011distributed .
+
+== 3.1 Quadratic Programming ==
+
+We are interested in solving QPs of the general form
+where x ∈ ℝ n x\in{\mathbb{R}}^{n} is the decision variable. The objective is defined by the symmetric positive semidefinite quadratic cost matrix P ∈ 𝕊 + n P\in{\mathbb{S}}_{+}^{n} and the linear cost vector q ∈ ℝ n q\in{\mathbb{R}}^{n} . The inequality constraints are defined by the matrix G ∈ ℝ m × n G\in{\mathbb{R}}^{m\times n} and the vector h ∈ ℝ m h\in{\mathbb{R}}^{m} . Similarly, the equality constraints are defined by the matrix A ∈ ℝ p × n A\in{\mathbb{R}}^{p\times n} and vector b ∈ ℝ p b\in{\mathbb{R}}^{p} .
+The optimality conditions for Equation 3 are given by:
+where y I ∈ ℝ m y_{I}\in\mathbb{R}^{m} and y E ∈ ℝ p y_{E}\in\mathbb{R}^{p} are the dual variables for the inequality and equality constraints, respectively.
+A tuple ( x ∗ , y I ∗ , y E ∗ ) (x^{*},y_{I}^{*},y_{E}^{*}) satisfying Equation 4 is a solution to Equation 3 .
+Throughout this work, we will avoid making any assumptions on G G or A A , meaning that the constraints may be redundant, and in the worst case, there may not exist a feasible x x for the optimization. This allows for a unified way to handle infeasibilities when optimizations of the form Equation 3 are embedded as a subproblem in SQP, as in Equation 2 .
+
+== 3.2 Elastic Formulation ==
+
+By introducing slack variables s ∈ ℝ m s\in{\mathbb{R}}^{m} , Equation 3 can be expressed equivalently as
+This standard technique is the basis of many interior point algorithms ( nocedal2006numerical ) .
+We then relax the set of equality constraints Equations 5b and 5c using ℓ 1 \ell_{1} penalty functions, yielding
+with elastic penalty parameters μ I , μ E > 0 \mu_{I},\mu_{E}>0 . This relaxation approach is known as elastic programming ( brown1975elastic ) , and one of the most well-known SQP-based solvers, SNOPT, uses this technique in order to reduce the infeasibility of a QP subproblem ( gill2005snopt ) . This relaxation is also a fundamental step in the sequential ℓ 1 \ell_{1} quadratic programming method of fletcher1985l1 .
+Notably, if Equation 3 has a feasible solution and the elastic penalty parameters are sufficiently large, then the solutions to Equation 3 and Equation 6 are identical — this is why the relaxation is exact.
+On the other hand, if the original QP Equation 3 is infeasible, then solving Equation 6 finds a point that minimizes the constraint violation ( nocedal2006numerical ) . This is formalized through the following theorem, which also describes what we mean by a sufficiently large penalty parameter.
+Let ( x ∗ , y I ∗ , y E ∗ ) (x^{*},y_{I}^{*},y_{E}^{*}) solve Equation 3 . Let μ I ∗ = ‖ y I ∗ ‖ ∞ \mu_{I}^{*}=\left\lVert y_{I}^{*}\right\rVert_{\infty} and μ E ∗ = ‖ y E ∗ ‖ ∞ \mu_{E}^{*}=\left\lVert y_{E}^{*}\right\rVert_{\infty} . Then, for all μ I ≥ μ I ∗ \mu_{I}\geq\mu_{I}^{*} and μ E ≥ μ E ∗ \mu_{E}\geq\mu_{E}^{*} , the minimizers of Equation 3 and Equation 6 coincide.
+This theorem is a generalization of the one by han1979exact that shows we can select a different penalty parameter for the inequality vs. equality constraints. The proof, provided in Appendix A relies on two simple facts: the optimality conditions of Equation 3 and the convexity of the objective. The proof also shows that it is possible to select vectors of penalty parameters μ I \mu_{I} and μ E \mu_{E} , as long as each μ I , i \mu_{I,i} and μ E , j \mu_{E,j} obeys the constraints μ I , i ≥ | y I , i | \mu_{I,{i}}\geq|y_{I,i}| or μ E , j ≥ | y E , j | \mu_{E,j}\geq|y_{E,j}| , respectively.
+What happens when the penalty parameters μ \bm{\mu} do not satisfy the conditions of Theorem 3.1 ? Using the interpretation of the Lagrange multiplier y i y_{i} representing the cost of an individual constraint i i with associated penalty parameter μ i > 0 \mu_{i}>0 , if μ i ≥ | y i | \mu_{i}\geq|y_{i}| then the penalty on violating constraint i i in Equation 6 is large enough such that Theorem 3.1 holds. On the other hand, if μ i < | y i | \mu_{i}<|y_{i}| , then this constraint i i is not being penalized strong enough, and so the solution to Equation 6 will violate this constraint, with the amount of violation proportional to the difference between μ i \mu_{i} and | y i | |y_{i}| . We use this interpretation in Section 4 to design feedback policies that select the best penalty parameters as a function of the optimizer state and enforce the condition μ i ≥ | y i | \mu_{i}\geq|y_{i}| during learning using a supervised loss that includes the Lagrange multipliers (see also Theorem 3.3 below).
+
+== 3.3 Operator Splitting & ADMM ==
+
+The optimization in Equation 6 can be simplified further to make the terms appearing in the ℓ 1 \ell_{1} penalty functions easier to handle. Introducing decision variables z I ∈ ℝ m z_{I}\in{\mathbb{R}}^{m} and z E ∈ ℝ p z_{E}\in{\mathbb{R}}^{p} , we have
+This is analogous to the transformation used by OSQP ( stellato2020osqp ) and will help simplify the ADMM updates.
+As the variables z I z_{I} and z E z_{E} are equal to the constraint violation, their optimal values can be viewed as a certificate of feasibility for Equation 3 if z I ∗ = z E ∗ = 0 z_{I}^{*}=z_{E}^{*}=0 and infeasibility if z I ∗ ≠ 0 z_{I}^{*}\neq 0 or z E ∗ ≠ 0 z_{E}^{*}\neq 0 .
+While it may seem tempting to apply ADMM to this formulation, the resultant updates will not have a closed-form solution no matter how the variable splitting is performed.
+Therefore, we perform a final transformation by introducing copy variables x ~ \tilde{x} s ~ \tilde{s} , z ~ I \tilde{z}_{I} , and z ~ E \tilde{z}_{E} , yielding
+where 𝒙 ~ = ( x ~ , s ~ , z ~ I , z ~ E ) \tilde{\bm{x}}=(\tilde{x},\tilde{s},\tilde{z}_{I},\tilde{z}_{E}) and 𝒙 = ( x , s , z I , z E ) \bm{x}=(x,s,z_{I},z_{E}) for notational simplicity. The indicator functions ℐ I {\mathcal{I}}_{I} , ℐ E {\mathcal{I}}_{E} , and ℐ s {\mathcal{I}}_{s} are defined as
+Let the dual variables for the constraint 𝒙 ~ = 𝒙 \tilde{\bm{x}}=\bm{x} be 𝒚 = ( w x , w s , y I , y E ) \bm{y}=(w_{x},w_{s},y_{I},y_{E}) . The ADMM updates for solving Equation 8 are given by
+where σ x , σ s , ρ I , ρ E > 0 \sigma_{x},\sigma_{s},\rho_{I},\rho_{E}>0 are the augmented Lagrangian penalty parameters, α ∈ ( 0 , 2 ) \alpha\in(0,2) is the ADMM relaxation parameter, ( s ) + = max ⁡ ( s , 0 ) (s)_{+}=\max(s,0) is the rectified linear unit (ReLU) activation function, and S κ ​ ( z ) = ( z − κ ) + − ( − z − κ ) + S_{\kappa}(z)=(z-\kappa)_{+}-(-z-\kappa)_{+} is the soft thresholding operator, which is the proximal operator of the ℓ 1 \ell_{1} norm ( boyd2011distributed ) . Note that by Equations 9b and 9f , we have that w x k + 1 = 0 w_{x}^{k+1}=0 for all k ≥ 0 k\geq 0 , so the w x w_{x} variable and update can be disregarded. The first block update Equation 9a is the most computationally-demanding step of the algorithm and requires the solution of an equality-constrained QP. We show how to solve this QP using either a direct or indirect method in Appendix B ; the indirect method becomes the only suitable choice for large-scale problems where the dimension can be very large. The final algorithm is summarized in Algorithm 1 of Appendix C .
+
+== 3.4 Convergence & Theoretical Analysis ==
+
+We establish the convergence of Algorithm 1 by showing that there always exists a saddle point of the Lagrangian for Equation 8 for any μ I , μ E > 0 \mu_{I},\mu_{E}>0 , as long as the relaxed QP objective in Equation 6 is not unbounded below. Then, since the optimization is a composite minimization of two closed, proper, convex functions, the algorithm converges by the general convergence of two-block ADMM ( boyd2011distributed ) . The proof is provided in Appendix D .
+Assume the relaxed objective ϕ ​ ( x , s ; μ I , μ E ) \phi(x,s;\mu_{I},\mu_{E}) , defined in Equation 6 , is not unbounded below.
+Then, Algorithm 1 for solving Equation 8 , equivalently Equation 6 , converges to a saddle point ( 𝐱 ~ ^ , 𝐱 ^ , 𝐲 ^ ) (\hat{\tilde{\bm{x}}},\hat{\bm{x}},\hat{\bm{y}}) of the Lagrangian for Equation 8 , given by
+The assumption on the objective being unbounded below is called coercitivity and is relatively weak ( bauschke2017convex ) .
+Coercitivity is only broken in the rare case when there exists an x ≠ 0 x\neq 0 such that P ​ x = 0 Px=0 , G ​ x = 0 Gx=0 , A ​ x = 0 Ax=0 , and q ⊤ ​ x < 0 q^{\top}x<0 , which causes the optimal solution to diverge.
+In our cases of interest, we consider over-constrained problems with many more constraints than optimization variables, thus it is extremely unlikely that this assumption does not hold.
+Moreover, a bounded objective can be guaranteed if P ≻ 0 P\succ 0 or if G G or A A are full column rank.
+The following theorem establishes the relationship between the FlexQP solution and the solution to the original QP and can be proven using the definition of soft thresholding. The proof is given in Appendix E .
+For any μ I , μ E > 0 \mu_{I},\mu_{E}>0 , let ( 𝐱 ~ ^ , 𝐱 ^ , 𝐲 ^ ) (\hat{\tilde{\bm{x}}},\hat{\bm{x}},\hat{\bm{y}}) solve the relaxed QP Equation 6 using Algorithm 1 . Then, | y ^ I , i | ≤ μ I |\hat{y}_{I,i}|\leq\mu_{I} for all inequality constraints i = 1 , … , m i=1,\ldots,m and | y ^ E , j | ≤ μ E |\hat{y}_{E,j}|\leq\mu_{E} for all equality constraints j = 1 , … , p j=1,\ldots,p . Furthermore, let ( x ∗ , y I ∗ , y E ∗ ) (x^{*},y_{I}^{*},y_{E}^{*}) solve Equation 3 , if it is feasible. If the conditions of Theorem 3.1 hold, then ( x ^ , y ^ I , y ^ E ) = ( x ∗ , y I ∗ , y E ∗ ) (\hat{x},\hat{y}_{I},\hat{y}_{E})=(x^{*},y_{I}^{*},y_{E}^{*}) . Otherwise, for any infeasible constraint i i with associated dual variable y i y_{i} , the FlexQP solution satisfies | y ^ i | = μ i |\hat{y}_{i}|=\mu_{i} .
+This shows that FlexQP solves Equation 3 if the original QP was feasible, and otherwise identifies a stationary point of the infeasibilities, similar to nocedal2006numerical .
+Finally, we summarize the key roles of the different hyperparameters of our algorithm. These insights are important for understanding the parameterization of our deep-unfolded architecture presented in the next section.
+Role of Elastic Penalty Parameters: The parameters μ I \mu_{I} and μ E \mu_{E} only appear in a single step of the algorithm during Equations 9d and 9e as part of the soft thresholding in the second block ADMM updates. Larger elastic penalties μ \mu result in a larger threshold, meaning that a larger amount of constraint violation will be zeroed out. The choice of μ \mu is key for satisfying the conditions of Theorem 3.1 .
+Role of Augmented Lagrangian Penalty Parameters: The role of the parameter σ x \sigma_{x} is to regularize the quadratic cost matrix P P and allows the equality-constrained QP Equation 9a to admit a unique solution even if P P is not positive definite ( P = 0 P=0 captures linear programs). We tested multiple fixed values of σ x \sigma_{x} along with adaptive and learned rules, but a fixed σ x = 1 ​ e ​ − 6 \sigma_{x}=$110-6$ appears to work very well in practice. This is similar to the choice of the σ \sigma parameter in OSQP ( stellato2020osqp ) .
+The parameter σ s \sigma_{s} plays the role of quadratic cost on the slack variable s s when solving Equation 9a . It also plays a small role in regularizing the constraint matrix G G . In practice, tuning this parameter is the most difficult as the optimal value appears to depend strongly on the scaling of the objective and the constraints. This motivates our adaptive data-driven approach described in Section 4 .
+The penalty parameters ρ I \rho_{I} and ρ E \rho_{E} play two key roles in the algorithm. First, they regularize the constraint matrices G G and A A so that Equation 9a is solvable regardless of the rank of G G or A A . Second, they weight the noise level in the soft thresholding operations Equations 9d and 9e playing an inverse role to μ I \mu_{I} and μ E \mu_{E} , where a larger ρ \rho results in a smaller threshold. Determining the optimal values of these parameters by hand is unintuitive as they can have varying effects on the optimization, further motivating the deep unfolding approach presented in the next section.
+
+
+=== 4 Accelerating Quadratic Programming via Deep Unfolding ===
+
+Figure 2 : One layer of our proposed Deep FlexQP architecture. We learn dimension-agnostic feedback policies for the parameters while the propagation from one layer to the next is defined by the ADMM updates Equation 9 .
+We focus our study on two recently proposed data-accelerated QP optimizers.
+The deep centralized QP optimizer from saravanos2025deep is a version of deep-unfolded OSQP where the penalty parameters ρ \rho and relaxation parameter α \alpha are learned as feedback policies on the problem residuals using an analogy to feedback control. In our comparisons, we refer to their method as Deep OSQP . The main limitation of their approach is that only scalar penalty parameters are learned, but it could be the case that different penalty parameters should be applied to different constraints to more effectively accelerate the optimizer. This was the main motivation for the deep QP method proposed by ichnowski2021accelerating , where a policy that outputs a vector of penalty parameters is learned using reinforcement learning. The vector policy is applied across the constraint dimensions so it is dimension-agnostic and generalizes across different problem classes. The authors show that the vector policy outperforms the scalar one across a suite of QP benchmarks. However, unlike saravanos2025deep , the authors do not learn the relaxation parameter α \alpha , which can greatly improve the convergence of ADMM ( boyd2011distributed ) . We implement the approach from ichnowski2021accelerating and train it using the supervised learning scheme from saravanos2025deep , leading to the baseline Deep OSQP — RLQP Parameterization . Finally, we implement a best-of-both-worlds approach that learns a vector feedback policy for the penalty parameters ρ \rho while also learning a policy for the ADMM relaxation parameter α \alpha , which we call Deep OSQP — Improved .
+
+== 4.1 Deep FlexQP Architecture ==
+
+Our proposed Deep FlexQP learns feedback policies for the algorithm parameters as a function of the current state of the optimizer as well as the QP and ADMM residuals, see Figure 2 . Based on the successes of the Deep OSQP methods discussed above, we learn separate policies π I \pi_{I} , π E \pi_{E} , and π α \pi_{\alpha} for the parameters related to the inequality constraints, equality constraints, and the relaxation parameter, respectively. Furthermore, the π I \pi_{I} and π E \pi_{E} policies are designed so that the resultant architecture is independent of problem size and permutation by applying the policies in a batched fashion per constraint coefficient. Note that the variables s s , z I z_{I} , w s w_{s} and y I y_{I} are one-to-one with μ I \mu_{I} , σ s \sigma_{s} , and ρ I \rho_{I} , and that z E z_{E} and y E y_{E} are one-to-one with μ E \mu_{E} and ρ E \rho_{E} . We therefore use s s , z I z_{I} , w s w_{s} , and y I y_{I} as inputs to the inequality policy π I \pi_{I} , along with their associated ADMM residuals and the relaxed QP residual ζ I = G ​ x + s − h − z I \zeta_{I}=Gx+s-h-z_{I} . We also include the infinity norm of the QP dual residual ζ dual = P ​ x + q + G ⊤ ​ y I + A ⊤ ​ y E \zeta_{\text{dual}}=Px+q+G^{\top}y_{I}+A^{\top}y_{E} as a scale-invariant measure of optimality. This leads to a total of ten inputs and three outputs corresponding to the coefficients of μ I \mu_{I} , σ s \sigma_{s} , and ρ I \rho_{I} . Likewise, the equality constraint policy π E \pi_{E} predicts the coefficients of μ E \mu_{E} and ρ E \rho_{E} as a function of the variables z E z_{E} and y E y_{E} , along with their associated ADMM residuals, the relaxed QP residual ζ E = A ​ x − b − z E \zeta_{E}=Ax-b-z_{E} , and the infinity norm of the dual residual ζ dual \zeta_{\text{dual}} , leading to six total inputs. Finally, the policy π α \pi_{\alpha} learns the relaxation parameter α \alpha as a function of the infinity norms of each of the QP and ADMM residuals, which provide a scale-invariant measure of how well and fast the optimizer is converging. Full expressions for the residuals and policies are given in Appendix F .
+All policies are parameterized by long short-term memory (LSTM) networks ( hochreiter1997long ) , with the hypothesis that learning long-term dependencies can aid the selection of the optimal parameters. This furthers the idea from saravanos2025deep that time-varying feedback on the current (nominal) parameters can provide a large improvement. In our case, we are applying feedback based on a latent state capturing the optimization history. Our results show that LSTMs provide the most benefit for problems where the active constraints might change many times over the course of the optimization. An ablation analysis and further discussion is provided in Appendix M .
+
+== 4.2 Supervised Learning ==
+
+For training Deep OSQP variants, we adopt the supervised learning approach from saravanos2025deep . Let x k ​ ( θ ) x^{k}(\theta) be the k th k^{\text{th}} iterate of Deep OSQP parameterized by θ \theta . The training objective is the weighted sum of the optimality gaps between the iterates x k ​ ( θ ) x^{k}(\theta) and the optimal solution x ∗ x^{*} :
+where γ k = exp ⁡ ( ( k − K ) / 5 ) \gamma_{k}=\exp((k-K)/5) is a per-iteration scaling factor.
+For training Deep FlexQP, we adopt a similar loss, but generalize it to incorporate the optimal Lagrange multipliers based on the discussion in Section 3 . We also use the normalized optimality gaps instead of the unnormalized ones so that the scale is automatically determined based on the distance from the optimal solution:
+where ξ = ( x , y I , y E ) \xi=(x,y_{I},y_{E}) .
+By including the Lagrange multipliers here, we are able to enforce the Deep FlexQP optimizer to select penalty parameters that meet the conditions of Theorem 3.1 , namely that μ I ≥ ‖ y I ∗ ‖ ∞ \mu_{I}\geq\left\lVert y_{I}^{*}\right\rVert_{\infty} and μ E ≥ ‖ y E ∗ ‖ ∞ \mu_{E}\geq\left\lVert y_{E}^{*}\right\rVert_{\infty} . This is due to the fact that the Lagrange multipliers of Deep FlexQP y I ​ ( θ ) y_{I}(\theta) and y E ​ ( θ ) y_{E}(\theta) are upper-bounded (in absolute value) by the current selection of μ \mu (see Theorem 3.3 ). An ablation studying the effect of this loss is provided in Appendix N .
+
+== 4.3 PAC-Bayes Generalization Bounds ==
+
+Recent approaches have been proposed for establishing generalization bounds for guaranteeing the performance of learning-to-optimize methods, including a binary loss approach from sambharya2025data as well as a more informative progress metric by saravanos2025deep , given as
+These approaches can be used to construct PAC-Bayes generalization bounds on the mean performance of the optimizer that hold with high probability. Nevertheless, a limitation of the resulting PAC-Bayes bound from Equation 13 is that it assumes that the losses can fall anywhere within in the range [ 0 , 1 ] [0,1] , despite the fact that, in practice, most of the final optimality gaps fall very close to 0 (on the order of 1 ​ e ​ − 2 110-2 and smaller). In other words, the loss in Equation 13 does not properly account for the scale of the errors, and as a result, obtaining a meaningful bound might require exponentially more training samples.
+For example, Figure 4(a) shows that training for this generalization bound loss results in a bound that is uninformative since it sits above even the vanilla optimizers and does not capture the behavior well at small errors.
+Figure 3 : Log-scaled loss better captures small errors when the solution is close to the optimal.
+To address this issue, we design a loss that is zero when the learner performs as well as or better than the optimal solution, and increases linearly as the performance decreases on a log-scale; see Figure 3 for a visualization. Furthermore, we penalize distance from the optimal solution with respect to the norm of the QP residuals, which better takes into account the problem scale:
+where R ​ ( ξ ) := ( P ​ x + q + G ⊤ ​ y I + A ⊤ ​ y E , max ⁡ ( G ​ x − h , 0 ) , A ​ x − b ) R(\xi)\vcentcolon=(Px+q+G^{\top}y_{I}+A^{\top}y_{E},\max(Gx-h,0),Ax-b) computes the residuals of the original QP in Equation 3 .
+As intended, training for this loss better captures the performance when the residuals are very small. Results are presented in Figure 4(b) and Appendix L .
+(a) Deep FlexQP trained for the generalization bound loss Equation 13 .
+(b) Deep FlexQP trained for our proposed generalization bound loss Equation 14 .
+Figure 4 : Optimizer comparison on 1000 test LASSO problems. Training using our log-normalized loss Equation 14 results in a substantially more informative performance guarantee.
+
+
+=== 5 Experimental Results ===
+
+
+== 5.1 Small- to Medium-Scale QPs ==
+
+We apply our deep-unfolded methodology to a benchmark suite of QPs including portfolio optimization problems from finance, classification and regression problems from machine learning, and linear optimal control problems.
+The results are presented in Figure 5 , and details on the problem representations as well as the data generation processes are provided in Appendix G .
+All experiments were run using PyTorch on a system with an Intel i9-13900K processor and an NVIDIA RTX 4090 GPU.
+In the following plots, OSQP and FlexQP are the best performing versions of OSQP and FlexQP, respectively, found using a hyperparameter search (details in Appendix I ). Deep OSQP is the approach from saravanos2025deep , Deep OSQP — RLQP Parameterization is the parameterization from ichnowski2021accelerating ,
+and Deep OSQP — Improved is the best-of-both-worlds version of deep-unfolded OSQP described in Section 4 .
+Finally, Deep FlexQP is our proposed deep-unfolded FlexQP optimizer with LSTM policy parameterization and trained using the loss Equation 12 . Each model is trained for 500 epochs on 500 problems (except for the random QP classes, which use 2000 problems) and evaluated on 1000 test problems.
+We also perform an extensive timing comparison and analysis between all of the above optimizers, presented in Appendix I .
+Figure 5 : Performance comparison of learned deep optimizers and their non-learned counterparts on small- to medium-scale QPs. Our improved version of Deep OSQP outperforms the baselines, while Deep FlexQP consistently surpasses the rest of the methods in terms of convergence to the optimal QP solution.
+
+== 5.2 Large-Scale QPs ==
+
+Next, we verify how well our methodology generalizes to large-scale QPs.
+In order to amortize the cost of training on these large-scale problems, we adopt a fine-tuning approach where the models trained on the small- to medium-scale problems from Section 5.1 are fine-tuned on a limited number of large-scale problems for a few epochs.
+Each model was fine-tuned on 100 training problems for 5 epochs.
+As each epoch takes roughly 3 hours to run, we estimate that training on the same number of problems and for the same number of epochs as the problems considered in Section 5.1 would take over 300 days, showing a clear benefit of the proposed fine-tuning approach. Figure 6 shows a comparison on 100 portfolio optimization and support vector machine (SVM) test problems with 10k variables and 10-20k constraints.
+Each optimizer is run until the infinity norm of the residuals falls below an absolute tolerance of ε = 1 ​ e ​ − 3 \varepsilon=$110-3$ , with a timeout of 10 minutes.
+Optimizers use the indirect method to solve their first block ADMM update (see Appendix B ).
+For the portfolio optimization problems, we additionally report the average number of iterations each optimizer took to converge, and, for the SVM problems, we additionally report the average number of conjugate gradient (CG) iterations that were necessary to solve the linear systems to a tolerance of ε CG = 1 ​ e ​ − 2 ⋅ ε \varepsilon_{\text{CG}}=$110-2$\cdot\varepsilon , with full results in Appendix J .
+We observe that the fine-tuned Deep FlexQP outperforms all of the other optimizers.
+Surprisingly, the fine-tuning approach does not seem to work as well for the Deep OSQP variants.
+Our hypothesis is that this is largely due to the use of the improved loss Equation 12 , which better captures the problem scale through the improved normalization.
+Figure 6 : Learned vs. traditional optimizers on large-scale QPs. Left: portfolio optimization (10k variables, 10k constraints). Right: support vector machines (10k variables, 20k constraints).
+
+== 5.3 Nonconvex Nonlinear Programming using SQP ==
+
+Lastly, we apply Deep FlexQP as a submodule in SQP to solve nonconvex NLPs arising from nonlinear optimal control and nonlinear predictive safety filter problems.
+Training for the generalization bound loss proposed in Equation 14 yields a numerical certificate of performance that we use when designing the SQP method. The results are provided in Figure 1 and Figure 7 . Further details are provided in Appendix H .
+Figure 7 : Comparison of our approach vs. traditional optimizer baselines on quadrotor trajectory optimization problems (left) and nonlinear predictive safety filter problems (right). Ours is faster than the baselines while vastly improving the task completion rate and safety.
+
+
+=== 6 Conclusion ===
+
+We present FlexQP, a flexible QP solver that can solve any convex QP with minimal assumptions on the constraints.
+FlexQP always returns a solution that minimizes the constraint violation, and thus can be used as a robust QP solver in SQP.
+Our accelerated variant, Deep FlexQP, outperforms other traditional optimizers and learned approaches in terms of convergence, both in number of iterations and solve time.
+Using Deep FlexQP as a submodule in SQP provides a substantial speedup over traditional approaches, while also allowing for a graceful recovery when an infeasible QP subproblem is encountered.
+Some potential future extensions include learning warm-starts for our solver and applying it to the distributed QP setting explored in saravanos2025deep .
+
+
+=== Appendix A Proof of Theorem 3.1 ===
+
+First, we state an equivalent representation of the relaxed QP:
+The relaxed QP Equation 6 can equivalently be expressed as the following optimization:
+Proof Convert the optimization to the form without slack variables. This can be equivalently derived by directly relaxing the constraints of the original QP Equation 3 using ℓ 1 \ell_{1} penalties.
+Now, the sketch of the proof of Theorem 3.1 is as follows. We will show for any μ I ≥ μ I ∗ = ‖ y I ∗ ‖ ∞ \mu_{I}\geq\mu_{I}^{*}=\left\lVert y_{I}^{*}\right\rVert_{\infty} and for any μ E ≥ μ E ∗ = ‖ y E ∗ ‖ ∞ \mu_{E}\geq\mu_{E}^{*}=\left\lVert y_{E}^{*}\right\rVert_{\infty} that
+1. if x ∗ x^{*} solves Equation 3 , then x ∗ x^{*} solves Equation 15 , and
+if x ∗ x^{*} solves Equation 3 , then x ∗ x^{*} solves Equation 15 , and
+2. if x ^ \hat{x} solves Equation 15 then x ^ \hat{x} solves Equation 3 .
+if x ^ \hat{x} solves Equation 15 then x ^ \hat{x} solves Equation 3 .
+Let x ∗ x^{*} solve Equation 3 . For any x ∈ ℝ n x\in\mathbb{R}^{n} we have that
+The step from Equation 16b to Equation 16c follows from the fact that μ I ≥ ‖ y I ∗ ‖ ∞ \mu_{I}\geq\left\lVert y_{I}^{*}\right\rVert_{\infty} and μ E ≥ ‖ y E ∗ ‖ ∞ \mu_{E}\geq\left\lVert y_{E}^{*}\right\rVert_{\infty} , and Equation 16d follows from the definition of the infinity norm. Equation 16e follows from the definition of ReLU and the absolute value and Equation 16f is implied by the linearity of the constraints.
+Obtaining Equation 16g follows from the complementary slackness condition y I , i ∗ ​ ( g i ⊤ ​ x i ∗ − h i ) = 0 y_{I,i}^{*}(g_{i}^{\top}x_{i}^{*}-h_{i})=0 for all i = 1 , … , m i=1,\ldots,m , and feasibility a i ⊤ ​ x i ∗ − b i = 0 a_{i}^{\top}x_{i}^{*}-b_{i}=0 for all i = 1 , … , p i=1,\ldots,p . Equation 16i comes from the stationary condition P ​ x ∗ + q + G ⊤ ​ y I ∗ + A ⊤ ​ y E ∗ = 0 Px^{*}+q+G^{\top}y_{I}^{*}+A^{\top}y_{E}^{*}=0 .
+Finally, obtaining Equation 16k follows from the positive semidefiniteness of P P .
+Thus, we have shown that ϕ ​ ( x ∗ ; μ I , μ E ) ≤ ϕ ​ ( x ; μ I , μ E ) \phi(x^{*};\mu_{I},\mu_{E})\leq\phi(x;\mu_{I},\mu_{E}) for any x x , which implies that x ∗ x^{*} minimizes ϕ ​ ( x ; μ I , μ E ) \phi(x;\mu_{I},\mu_{E}) and therefore solves Equation 15 .
+Next, let x ^ \hat{x} solve Equation 15 . If x ∗ ≠ x ^ x^{*}\neq\hat{x} solves Equation 3 , then we have that
+which follows by the optimality of x ^ \hat{x} .
+Now, assume that x ^ \hat{x} is not feasible for Equation 3 . Then
+where we have used the same facts as in Part 1.
+Rearranging, we have that
+but either x ^ = x ∗ \hat{x}=x^{*} or this contradicts the fact that x ^ \hat{x} minimized ϕ ​ ( ⋅ ; μ I , μ E ) \phi(\cdot;\mu_{I},\mu_{E}) in Equation 19 . Thus, x ^ \hat{x} must be feasible for Equation 3 .
+Therefore, by Equation 19 we have that
+so x ^ \hat{x} minimizes the quadratic objective and thus solves Equation 3 , completing the proof.
+
+
+=== Appendix B FlexQP — First Block ADMM Update ===
+
+The most computationally demanding step of FlexQP is the first block update Equation 9a , which is an equality-constrained QP:
+The optimality conditions for this QP are given by
+where ν ~ I ∈ ℝ m \tilde{\nu}_{I}\in{\mathbb{R}}^{m} and ν ~ E ∈ ℝ p \tilde{\nu}_{E}\in{\mathbb{R}}^{p} are the Lagrange multipliers for the equality constraints Equation 28b . Solving this QP as-is would be expensive since it requires solving a linear system of size n + 3 ​ m + 2 ​ p n+3m+2p . However, we can eliminate s ~ \tilde{s} , z ~ I \tilde{z}_{I} , and z ~ E \tilde{z}_{E} using Equations 29b , 29c and 29d above, so the linear system simplifies to
+with the eliminated variables recoverable using
+The coefficient matrix in the linear system Equation 30 is always full rank due to the positive parameters σ x \sigma_{x} , σ s \sigma_{s} , ρ I \rho_{I} , and ρ E \rho_{E} introduced through the ADMM splitting. This linear system can be solved using a direct method such as an L ​ D ​ L ⊤ LDL^{\top} factorization requiring O ​ ( ( n + m + p ) 3 ) O((n+m+p)^{3}) time, the same as OSQP using the direct method. On the other hand, for large-scale QPs, i.e., when n + m + p n+m+p is very large, factoring this matrix can be prohibitively expensive. In this case, we can use an indirect method to solve the reduced system
+where G ¯ = ( σ s − 1 + ρ I − 1 ) − 1 ​ G \bar{G}=(\sigma_{s}^{-1}+\rho_{I}^{-1})^{-1}G and A ¯ = ρ E ​ A \bar{A}=\rho_{E}A .
+This can be obtained by eliminating ν ~ I \tilde{\nu}_{I} and ν ~ E \tilde{\nu}_{E} from the linear system Equation 30 . These variables are recoverable using
+The coefficient matrix in Equation 32 is always positive definite, so the linear system can be solved using an iterative algorithm such as the conjugate gradient (CG) method. The linear system is of size n n , matching the complexity of OSQP using the indirect method. In this work, we consider a supervised learning setting where we will need to compute derivatives of the solution x ~ \tilde{x} with respect to the parameters σ x \sigma_{x} , ρ I \rho_{I} , etc. While each iteration of the CG method is very fast, it can require many iterations to converge to a low-error solution. It would be very inefficient to backpropagate through all these iterations of the CG method, the main issue being the high memory cost since the entire compute graph needs to be stored and then differentiated through during the backward pass. We instead adopt the approach from saravanos2025deep using differentiable optimization in order to compute these derivatives in a more efficient manner. In practice, this means we can compute the derivatives by solving a new linear system with the same coefficient matrix but different right-hand side during the backward pass.
+
+
+=== Appendix C FlexQP Algorithm ===
+
+Algorithm 1 FlexQP
+
+
+=== Appendix D Proof of Theorem 3.2 ===
+
+To show that a saddle point of Equation 10 exists, it suffices to show that the relative interior of the domains of f f and g g are non-empty.
+This is a form of constraint qualification guaranteeing strong duality ( rockafellar1970convex , Theorem 16.4) .
+The relative interior of f f is simply the feasible set { ( x , s , z I , z E ) : z I = G ​ x + s − h , z E = A ​ x − b } \{(x,s,z_{I},z_{E}):z_{I}=Gx+s-h,z_{E}=Ax-b\} , which is non-empty (pick any x , s x,s and then let z I = G ​ x + s − h z_{I}=Gx+s-h and z E = A ​ x − b z_{E}=Ax-b ).
+Meanwhile, the relative interior of g g is given by the set { ( x , s , z I , z E ) : s > 0 } \{(x,s,z_{I},z_{E}):s>0\} due to the constraint s ≥ 0 s\geq 0 .
+Combining, this shows that relint ⁡ ( dom ⁡ f ) ∩ relint ⁡ ( dom ⁡ g ) ≠ ∅ \operatorname{relint}(\operatorname{dom}f)\cap\operatorname{relint}(\operatorname{dom}g)\neq\emptyset , so strong duality holds and a saddle point exists by rockafellar1970convex .
+Furthermore, as the objective f f and g g are closed, proper, and convex, by boyd2011distributed , Algorithm 1 converges. Namely, we have that the ADMM primal residuals 𝜻 ~ k → 0 \tilde{\bm{\zeta}}^{k}\to 0 and ADMM dual residuals 𝜻 ¯ k → 0 \bar{\bm{\zeta}}^{k}\to 0 as k → ∞ k\to\infty , where
+Furthermore, we also have that iterates 𝒙 ~ k → 𝒙 ~ ^ \tilde{\bm{x}}^{k}\to\hat{\tilde{\bm{x}}} , 𝒙 k → 𝒙 ^ \bm{x}^{k}\to\hat{\bm{x}} , and 𝒚 k → 𝒚 ^ \bm{y}^{k}\to\hat{\bm{y}} as k → ∞ k\to\infty .
+
+
+=== Appendix E Proof of Theorem 3.3 ===
+
+The proof follows from the definition of the soft thresholding operator. First, we consider the z I z_{I} and z E z_{E} updates from Equations 9d and 9e as well as the dual variable updates for y I y_{I} and y E y_{E} from Equations 9h and 9i . Assume w.l.o.g. that α = 1 \alpha=1 . These updates have the general form:
+Now, there are three cases the consider based on the output of the soft thresholding operation:
+1. Positive constraint violation: If z ~ k + 1 + y k / ρ > μ / ρ \tilde{z}^{k+1}+y^{k}/\rho>\mu/\rho , then z k + 1 = z ~ k + 1 + y k / ρ − μ / ρ z^{k+1}=\tilde{z}^{k+1}+y^{k}/\rho-\mu/\rho . Substituting into Equation 36 yields y k + 1 = μ y^{k+1}=\mu .
+Positive constraint violation: If z ~ k + 1 + y k / ρ > μ / ρ \tilde{z}^{k+1}+y^{k}/\rho>\mu/\rho , then z k + 1 = z ~ k + 1 + y k / ρ − μ / ρ z^{k+1}=\tilde{z}^{k+1}+y^{k}/\rho-\mu/\rho . Substituting into Equation 36 yields y k + 1 = μ y^{k+1}=\mu .
+2. No constraint violation: If | z ~ k + 1 + y k / ρ | ≤ μ / ρ |\tilde{z}^{k+1}+y^{k}/\rho|\leq\mu/\rho , then z k + 1 = 0 z^{k+1}=0 . This further implies ρ ​ | z ~ k + 1 + y k / ρ | ≤ μ \rho|\tilde{z}^{k+1}+y^{k}/\rho|\leq\mu and by Equation 36 this implies | y k + 1 | ≤ μ |y^{k+1}|\leq\mu .
+No constraint violation: If | z ~ k + 1 + y k / ρ | ≤ μ / ρ |\tilde{z}^{k+1}+y^{k}/\rho|\leq\mu/\rho , then z k + 1 = 0 z^{k+1}=0 . This further implies ρ ​ | z ~ k + 1 + y k / ρ | ≤ μ \rho|\tilde{z}^{k+1}+y^{k}/\rho|\leq\mu and by Equation 36 this implies | y k + 1 | ≤ μ |y^{k+1}|\leq\mu .
+3. Negative constraint violation: If z ~ k + 1 + y k / ρ < μ / ρ \tilde{z}^{k+1}+y^{k}/\rho<\mu/\rho , then z k + 1 = z ~ k + 1 + y k / ρ + μ / ρ z^{k+1}=\tilde{z}^{k+1}+y^{k}/\rho+\mu/\rho . Substituting into Equation 36 yields y k + 1 = − μ y^{k+1}=-\mu .
+Negative constraint violation: If z ~ k + 1 + y k / ρ < μ / ρ \tilde{z}^{k+1}+y^{k}/\rho<\mu/\rho , then z k + 1 = z ~ k + 1 + y k / ρ + μ / ρ z^{k+1}=\tilde{z}^{k+1}+y^{k}/\rho+\mu/\rho . Substituting into Equation 36 yields y k + 1 = − μ y^{k+1}=-\mu .
+Combining these three cases, we have that | y k + 1 | ≤ μ |y^{k+1}|\leq\mu , for any z ~ k + 1 , y k \tilde{z}^{k+1},y^{k} and therefore | y ^ | ≤ μ |\hat{y}|\leq\mu . This proves the first and last statement of the theorem. Applying Theorem 3.1 shows the second statement.
+
+
+=== Appendix F Deep FlexQP Policy Parameterization ===
+
+The residuals for Equation 7 are given by
+The ADMM residuals for Equation 8 are defined in Equation 34 .
+We ignore the residuals corresponding to x x since it is unconstrained in the second ADMM block (so the primal residual is not very meaningful) and we have already captured the optimality through Equation 37 .
+The policy π I : ℝ 10 → ℝ + 3 \pi_{I}:{\mathbb{R}}^{10}\to{\mathbb{R}}_{+}^{3} is given by
+where we have dropped the indices by constraint i i and iteration k k for clarity.
+The policy π E : ℝ 6 → ℝ + 2 \pi_{E}:{\mathbb{R}}^{6}\to{\mathbb{R}}_{+}^{2} is given by
+The policy π α : ℝ 9 → ( 0 , 2 ) \pi_{\alpha}:{\mathbb{R}}^{9}\to(0,2) is given by
+where the norm used is the infinity norm.
+We consider two policy parameterizations: multilayer perceptrons (MLPs) and LSTMs (see Appendix M for experimental comparison). Following saravanos2025deep , MLP policies are small networks with two hidden layers of sizes [32, 32]. LSTM policies use a hidden size of 32 followed by an MLP with hidden layers [32, 32] for prediction. We use sigmoid for all activation functions, which we find are much more stable than ReLU activations, most likely due to the autoregressive nature of deep unfolding.
+Computationally, we log-scale any small positive inputs like the infinity norms of the residuals. Following ichnowski2021accelerating , we also predict log-transformed values log ⁡ μ I \log\mu_{I} , log ⁡ ρ E \log\rho_{E} , etc. and then apply an exponential function so that it is easier to predict parameters across a wide scale of values. We then clamp the parameters (besides α \alpha ) to the range [ 1 ​ e ​ − 6 , 1 ​ e ​ 6 ] [$110-6$,$1106$] ; α ∈ ( 0 , 2 ) \alpha\in(0,2) is enforced using a scaled sigmoid function.
+
+
+=== Appendix G Further Details on QP Problem Classes ===
+
+A summary of the problem sizes and training parameters of the different classes is presented in Table 1 . For the small- to medium-scale QPs, we train all models for 500 epochs and evaluate using 1000 test samples. More training samples are used for random QPs following the setup by saravanos2025deep since the shared structure between these QPs is less clear and therefore harder to learn.
+As described in the main text, for the large-scale problems, we fine-tune the models trained on the smaller scale problems on 100 large-scale problems for 5 epochs, and test on 100 new problems.
+Table 1 : QP problem sizes and number of samples used for training.
+
+== G.1 Random QPs ==
+
+The first type of problems we study are random QPs of the form Equation 3 . These are helpful as we can freely adjust the number of constraints as well as the sparsity of the problem directly in order to benchmark the optimizers under different operating conditions.
+Problem Instances: We adopt the problem generation procedure from saravanos2025deep , where P = M ⊤ ​ M + α ​ I P=M^{\top}M+\alpha I with α = 1 \alpha=1 and all elements of M M , q q , G G , and A A are standard normal distributed, i.e., each element M i ​ j , q i , G i ​ j , A i ​ j ∼ 𝒩 ​ ( 0 , 1 ) M_{ij},q_{i},G_{ij},A_{ij}\sim\mathcal{N}(0,1) . The vectors h h and b b are generated using h = G ​ ξ h=G\xi and b = A ​ ζ b=A\zeta with ξ , ζ \xi,\zeta standard normal vectors.
+We consider two classes of random QPs. The first class, Random QPs , contains only inequality constraints generated by setting the problem dimensions as n = 50 n=50 , m = 40 m=40 , and p = 0 p=0 . The second class, Random QPs with Equalities contains a mix of inequality and equality constraints, and is generated using n = 50 n=50 , m = 25 m=25 , and p = 20 p=20 .
+
+== G.2 Portfolio Optimization ==
+
+Portfolio Optimization is a foundational problem in finance where the goal is to maximize the risk-adjusted return of a group of assets ( markowitz1952portfolio ; boyd2013performance ; boyd2017multi ) . This can be represented as the following QP ( boyd2004convex ; stellato2020osqp ) :
+where x ∈ ℝ n x\in\mathbb{R}^{n} is the portfolio, μ ∈ ℝ n \mu\in\mathbb{R}^{n} is the expected returns, γ > 0 \gamma>0 is the risk aversion parameter, and Σ ∈ 𝕊 + n \Sigma\in\mathbb{S}_{+}^{n} is the risk model covariance.
+QP Representation: We assume that Σ = F ​ F ⊤ + D \Sigma=FF^{\top}+D where F ∈ ℝ n × k F\in\mathbb{R}^{n\times k} is the rank- k k factor loading matrix with k < n k<n and D ∈ ℝ n × n D\in\mathbb{R}^{n\times n} is the diagonal matrix specifying the asset-specific risk. Using this assumption, the optimization problem can be converted into a more efficient QP representation:
+This new QP has n + k n+k decision variables, k + 1 k+1 equality constraints, and n n inequality constraints.
+Problem Instances: For the medium-scale problems, we use the problem generation described in saravanos2025deep , setting n = 250 n=250 , k = 25 k=25 , and γ = 1.0 \gamma=1.0 .
+The large-scale problems are generated using n = 10000 n=10000 assets, k = 100 k=100 factors, and γ = 1.0 \gamma=1.0 .
+The expected returns μ \mu are sampled using μ i ∼ 𝒩 ​ ( 0 , 1 ) \mu_{i}\sim\mathcal{N}(0,1) .
+The factor loading matrix F F has 50% non-zero elements sampled through F i ​ j ∼ 𝒩 ​ ( 0 , 1 ) F_{ij}\sim\mathcal{N}(0,1) .
+The diagonal elements of D D are generated uniformly as D i ​ i ∼ 𝒰 ​ ( 0 , k ) D_{ii}\sim\mathcal{U}(0,\sqrt{k}) .
+
+== G.3 Support Vector Machines ==
+
+Support Vector Machines (SVMs) is a classical machine learning problem where the goal is to find a linear classifier that best separates two sets of points ( cortes1995support ) :
+where λ > 0 \lambda>0 , b i ∈ { − 1 , 1 } b_{i}\in\{-1,1\} is the label, and a i ∈ ℝ n a_{i}\in\mathbb{R}^{n} is the set of features for point i i .
+QP representation: The SVM problem Equation 43 can be converted into an equivalent QP representation ( stellato2020osqp ) :
+This QP has n + m n+m decision variables and 2 ​ m 2m inequalty constraints.
+Problem Instances: We generate medium-scale problems using the rules from stellato2020osqp with n = 10 n=10 features, m = 200 m=200 data points, and λ = 1 \lambda=1 .
+Large-scale problems are generated using n = 100 n=100 features, m = 10000 m=10000 data points, and λ = 1 \lambda=1 .
+The labels b b are chosen using
+and the elements of A A are chosen such that
+
+== G.4 LASSO ==
+
+LASSO (least absolute shrinkage and selection operator) is a fundamental problem in statistics and machine learning ( tibshirani1996regression ; candes2008enhancing ) . The objective is to select sparse coefficients of a linear model that best match the given observations:
+where x ∈ ℝ n x\in\mathbb{R}^{n} , A ∈ ℝ m × n A\in\mathbb{R}^{m\times n} is the data matrix, b ∈ ℝ m b\in\mathbb{R}^{m} are the observations, and λ > 0 \lambda>0 is the weighting parameter.
+QP Representation: LASSO can be represented as a QP by introducing two extra decision variables y ∈ ℝ m y\in\mathbb{R}^{m} and t ∈ ℝ n t\in\mathbb{R}^{n} which help simplify the objective ( stellato2020osqp ) :
+Problem Instances: We use the data generation procedure from ( stellato2020osqp ) , where A A has 15% non-zero normally-distributed elements A i ​ j ∼ 𝒩 ​ ( 0 , 1 ) A_{ij}\sim\mathcal{N}(0,1) and b b is generated through b = A ​ v + ϵ b=Av+\epsilon with
+and ϵ i ∼ 𝒩 ​ ( 0 , 1 ) \epsilon_{i}\sim\mathcal{N}(0,1) . The parameter λ \lambda is chosen as λ = ( 1 / 5 ) ​ ∥ A ⊤ ​ b ∥ ∞ \lambda=(1/5)\lVert A^{\top}b\rVert_{\infty} .
+
+== G.5 Huber Fitting ==
+
+Huber Fitting is a robust least squares problem where the goal is to perform a linear regression with the assumption that outliers are present in the data ( huber1964robust ; huber1981robust ) :
+where the penalty function ϕ hub \phi_{\text{hub}} penalizes the residuals quadratically when they are large and linearly when they are small:
+with δ > 0 \delta>0 representing the slope of the linear term.
+QP Representation: This robust least squares problem can be represented in the following QP form ( stellato2020osqp ) :
+This QP has n + 3 ​ m n+3m decision variables, 2 ​ m 2m inequalities, and m m equalities.
+Problem Instances: We follow stellato2020osqp and generate A A with 15% nonzero elements with A i ​ j ∼ 𝒩 ​ ( 0 , 1 ) A_{ij}\sim\mathcal{N}(0,1) and set b = A ​ v + ϵ b=Av+\epsilon where
+We let δ = 1 \delta=1 and choose the problem dimensions as n = 10 n=10 features and m = 10 ​ n = 100 m=10n=100 datapoints.
+
+== G.6 Linear Optimal Control ==
+
+The goal in linear optimal control is to stabilize the system to the origin subject to dynamical constraints as well as polyhedral constraints on the states and controls. This results in QPs of the form
+where T > 0 T>0 is the time horizon, Q ∈ 𝕊 + n x Q\in\mathbb{S}_{+}^{n_{x}} is the running state cost matrix, R ∈ 𝕊 + + n u R\in\mathbb{S}_{++}^{n_{u}} is the control cost matrix, Q T ∈ 𝕊 + n x Q_{T}\in\mathbb{S}_{+}^{n_{x}} is the terminal state cost matrix, A d ∈ ℝ n x × n x A_{d}\in\mathbb{R}^{n_{x}\times n_{x}} and B d ∈ ℝ n x × n u B_{d}\in\mathbb{R}^{n_{x}\times n_{u}} define the dynamics of the system, A u ∈ ℝ m u × n u A_{u}\in\mathbb{R}^{m_{u}\times n_{u}} and b u ∈ ℝ m u b_{u}\in\mathbb{R}^{m_{u}} define the input constraints, A x ∈ ℝ m x × n x A_{x}\in\mathbb{R}^{m_{x}\times n_{x}} and b x ∈ ℝ m x b_{x}\in\mathbb{R}^{m_{x}} define the state constraints, and x ¯ 0 ∈ ℝ n x \bar{x}_{0}\in\mathbb{R}^{n_{x}} is the initial condition.
+We study three classes of linear optimal control problems (OCPs). The first, Random Linear OCPs , consists of randomly generated stabilizable dynamics along with random costs, constraints, and initial conditions. The second and third classes, Double Integrator and Oscillating Masses , are adapted from chen2022large and contain dynamics with true physical interpretations. The randomness in these problems is given by sampling varying initial conditions for the systems as in saravanos2025deep .
+
+== G.6.1 Random Linear OCPs ==
+
+We use the problem generation procedure similar to that in stellato2020osqp . We set the state dimension n x = 8 n_{x}=8 and n u = n x / 2 = 4 n_{u}=n_{x}/2=4 . The dynamics are generated by A d = X − 1 ​ A ​ X A_{d}=X^{-1}AX , where A = diag ⁡ ( a ) ∈ ℝ n x × n x A=\operatorname{diag}(a)\in{\mathbb{R}}^{n_{x}\times n_{x}} such that a i ∼ 𝒰 ​ ( − 1 , 1 ) a_{i}\sim{\mathcal{U}}(-1,1) and X ∈ ℝ n x × n x X\in{\mathbb{R}}^{n_{x}\times n_{x}} with elements generated by X i ​ j ∼ 𝒩 ​ ( 0 , 1 ) X_{ij}\sim{\mathcal{N}}(0,1) , and B d ∈ ℝ n x × n u B_{d}\in{\mathbb{R}}^{n_{x}\times n_{u}} with ( B d ) i ​ j ∼ 𝒩 ​ ( 0 , 1 ) (B_{d})_{ij}\sim{\mathcal{N}}(0,1) .
+The running state cost Q ∈ 𝕊 + n x Q\in{\mathbb{S}}_{+}^{n_{x}} is generated by Q = diag ⁡ ( q ) Q=\operatorname{diag}(q) where each element of the sparse vector q q is generated by
+so that q q has 70 % 70\% nonzero values. We fix the control cost R = 0.1 ​ I u R=0.1I_{u} and the terminal cost Q T Q_{T} is determined by solving the discrete algebraic Riccati for the optimal cost of a linear quadratic regulator applied to A , B , Q A,B,Q , and R R . The state and control constraints are generated by
+Note that we use I x I_{x} and I u I_{u} as a shorthand for I n x I_{n_{x}} and I n u I_{n_{u}} . Finally, we sample the initial state from x ¯ 0 ∼ 𝒰 ​ ( − 0.5 ​ x bound , 0.5 ​ x bound ) \bar{x}_{0}\sim{\mathcal{U}}(-0.5x^{\text{bound}},0.5x^{\text{bound}}) .
+
+== G.6.2 Double Integrator ==
+
+For the double integrator, adapted from chen2022large , we have n x = 2 n_{x}=2 , n u = 1 n_{u}=1 , and T = 20 T=20 timesteps. The dynamics are fixed with
+We use cost matrices Q = Q T = I x Q=Q_{T}=I_{x} and R = 1.0 R=1.0 . The state and control constraints are given by
+The initial state is sampled from x ¯ 0 ∼ 𝒰 ​ ( [ − 1 − 0.3 ] , [ 1 0.3 ] ) . \bar{x}_{0}\sim\mathcal{U}\left(\begin{bmatrix}-1\\
+-0.3\end{bmatrix},\begin{bmatrix}1\\
+0.3\end{bmatrix}\right).
+
+== G.6.3 Oscillating Masses ==
+
+For the oscillating masses problem, we have n x = 12 n_{x}=12 , n u = 3 n_{u}=3 , T = 10 T=10 . For this problem, the discrete-time dynamics matrices A d A_{d} and B d B_{d} are obtained through the Euler discretization of the continuous-time dynamics of the oscillating masses system, namely
+where Δ ​ t = 0.5 \Delta t=0.5 . The matrices A c ∈ ℝ n x × n x A_{c}\in{\mathbb{R}}^{n_{x}\times n_{x}} and B c ∈ ℝ n x × n u B_{c}\in{\mathbb{R}}^{n_{x}\times n_{u}} define the continuous-time dynamics and are given by
+where c = 1 c=1 , d = 0.1 d=0.1 , a = − 2 ​ c a=-2c , b = 2 b=2 , 0 m × n 0_{m\times n} is the zero matrix in ℝ m × n {\mathbb{R}}^{m\times n} , L n L_{n} is the lower shift matrix in ℝ n × n {\mathbb{R}}^{n\times n} , and F = [ e 1 − e 1 e 2 e 3 − e 2 e 3 ] ⊤ F=\begin{bmatrix}e_{1}&-e_{1}&e_{2}&e_{3}&-e_{2}&e_{3}\end{bmatrix}^{\top} , where e 1 , e 2 , e_{1},e_{2}, and e 3 e_{3} are the standard basis vectors in ℝ 3 {\mathbb{R}}^{3} . We use cost matrices Q = Q T = I x Q=Q_{T}=I_{x} and R = I u R=I_{u} . The state and control constraints are given by
+Finally, we sample the initial state from x ¯ 0 ∼ 𝒰 ​ ( − 𝟏 x , 𝟏 x ) \bar{x}_{0}\sim{\mathcal{U}}(-\bm{1}_{x},\bm{1}_{x}) .
+
+
+=== Appendix H Nonconvex Nonlinear Programming using SQP ===
+
+
+== H.1 Nonlinear Optimal Control ==
+
+We consider nonlinear constrained optimal control problems of the following form:
+where x t ∈ ℝ n x_{t}\in{\mathbb{R}}^{n} and u t ∈ ℝ m u_{t}\in{\mathbb{R}}^{m} are the states and controls, respectively. The function ℓ : ℝ n × ℝ m → ℝ \ell:{\mathbb{R}}^{n}\times{\mathbb{R}}^{m}\to{\mathbb{R}} is the running cost and ϕ : ℝ n → ℝ \phi:{\mathbb{R}}^{n}\to{\mathbb{R}} is the terminal cost. The time horizon is T > 0 T>0 and x ¯ 0 ∈ ℝ n \bar{x}_{0}\in{\mathbb{R}}^{n} is the initial condition. The problem formulation in Equation 62 includes state and control constraints represented by the functions h ​ ( x t ) h(x_{t}) and g ​ ( u t ) g(u_{t}) . In the next two subsections, we provide the specific nonlinear optimal control examples for the cases of the Dubins vehicle and quadrotor.
+
+== H.1.1 Dubins Vehicle ==
+
+The Dubins vehicle is a dynamics model with a state x = ( p x , p y , θ ) ∈ ℝ 3 x=(p_{x},p_{y},\theta)\in{\mathbb{R}}^{3} , where p x p_{x} and p y p_{y} are the vehicle’s position in the Cartesian plane and θ \theta is its orientation. We use the unicycle formulation of the continuous-time Dubins vehicle dynamics x ˙ = f ​ ( x , u ) \dot{x}=f(x,u) adapted from siciliano2009unicycle , where the control is given by u = ( v , ω ) ∈ ℝ 2 u=(v,\omega)\in{\mathbb{R}}^{2} . Here, v v is the forward velocity of the vehicle and ω \omega is the steering velocity of the vehicle.
+Figure 8 : Visualization of a sample Dubins vehicle task. The goal is to reach the target state while avoiding obstacles and respecting the dynamics and input constraints.
+We formulate a nonlinear optimal control problem following Equation 62 . We discretize the continuous-time dynamics using the Euler discretization x t + 1 = F ​ ( x t , u t ) = x t + f ​ ( x t , u t ) ​ Δ ​ t x_{t+1}=F(x_{t},u_{t})=x_{t}+f(x_{t},u_{t})\Delta t and use quadratic costs ℓ ​ ( x , u ) = x ⊤ ​ Q ​ x + u ⊤ ​ R ​ u \ell(x,u)=x^{\top}Qx+u^{\top}Ru and ϕ ​ ( x ) = x ⊤ ​ Q T ​ x \phi(x)=x^{\top}Q_{T}x , where Q = diag ⁡ ( 1.0 , 1.0 , 0.1 ) Q=\operatorname{diag}(1.0,1.0,0.1) , R = 0.1 ⋅ I R=0.1\cdot I , and Q T = 100 ⋅ Q Q_{T}=100\cdot Q .
+The initial and target state, x 0 x_{0} and x target x_{\text{target}} , are sampled uniformly from 𝒰 ​ ( − x ¯ , x ¯ ) \mathcal{U}(-\bar{x},\bar{x}) , where x ¯ = ( 5.0 , 5.0 , π ) \bar{x}=(5.0,5.0,\pi) . The discretization of the dynamics uses Δ ​ t = 0.033 \Delta t=0.033 and the time horizon for trajectory optimization is T = 50 T=50 timesteps.
+We generate 5 circular obstacles with the form
+where the centers c i ∈ ℝ 2 c_{i}\in\mathbb{R}^{2} are sampled uniformly at random in the region between the vehicle’s initial and target positions, and the radii r i > 0 r_{i}>0 are sampled uniformly from 𝒰 ​ ( r min , r max ) \mathcal{U}(r_{\min},r_{\max}) with r min = 0.01 ⋅ ‖ x target − x 0 ‖ 2 r_{\min}=0.01\cdot\left\lVert x_{\text{target}}-x_{0}\right\rVert_{2} and r max = 0.2 ⋅ ‖ x target − x 0 ‖ 2 r_{\max}=0.2\cdot\left\lVert x_{\text{target}}-x_{0}\right\rVert_{2} .
+The controls are constrained by v ∈ [ − 10 , 10 ] v\in[-10,10] and ω ∈ [ − 5 , 5 ] \omega\in[-5,5] . This leads to a nonlinear optimization problem with 253 variables, 455 inequality constraints, and 153 equality constraints.
+For generating the QP training data, we generate 500 QP subproblems by solving randomly generated Dubins vehicle problems with SQP using OSQP as the QP solver.
+For evaluation, we generate 100 random control problems and solve them using SQP with OSQP or SQP with Deep FlexQP.
+Each algorithm is allowed 50 SQP iterations and runs until the infinity norm of the SQP residuals falls below an absolute tolerance of ε = 1 ​ e ​ − 2 \varepsilon=$110-2$ . Furthermore, each QP solver runs until convergence of 1 ​ e ​ − 3 110-3 is reached, with a max budget of 10 seconds and an unlimited number of iterations.
+
+== H.1.2 Quadrotor ==
+
+We use the continuous-time quadrotor dynamics model x ˙ = f ​ ( x , u ) \dot{x}=f(x,u) from Sabatino2015QuadrotorCM .
+The model consists of the state x ∈ ℝ 12 x\in{\mathbb{R}}^{12} that includes the linear positions, angles, linear velocities, and angular velocities. The system is actuated by a four controls, the collective thrust F F and three torques, given by u = ( F , τ x , τ y , τ z ) ∈ ℝ 3 u=(F,\tau_{x},\tau_{y},\tau_{z})\in{\mathbb{R}}^{3} .
+Figure 9 : Visualization of a sample quadrotor task. The goal is to reach the target state from the initial state subject to dynamical constraints and input constraints.
+Using this model, we formulate nonlinear optimal control problems as in Equation 62 . We discretize the dynamics through the Euler discretization x t + 1 = F ​ ( x t , u t ) = x t + f ​ ( x t , u t ) ​ Δ ​ t x_{t+1}=F(x_{t},u_{t})=x_{t}+f(x_{t},u_{t})\Delta t . The cost in Equation 62 is defined by the quadratic cost ℓ ​ ( x , u ) = x ⊤ ​ Q ​ x + u ⊤ ​ R ​ u \ell(x,u)=x^{\top}Qx+u^{\top}Ru and ϕ ​ ( x ) = x ⊤ ​ Q T ​ x \phi(x)=x^{\top}Q_{T}x , where the cost matrices are given by
+along with R = 0.01 ⋅ I R=0.01\cdot I and Q T = 1000 ⋅ Q Q_{T}=1000\cdot Q .
+The initial and target state are sampled uniformly from 𝒰 ​ ( − x ¯ , x ¯ ) \mathcal{U}(-\bar{x},\bar{x}) where x ¯ = ( 5 , 5 , 5 , 1 , 1 , 1 , π , π / 2 , π , 1 , 1 , 1 ) \bar{x}=(5,5,5,1,1,1,\pi,\pi/2,\pi,1,1,1) . The discretization of the dynamics uses Δ ​ t = 0.05 \Delta t=0.05 and the time horizon for trajectory optimization is T = 50 T=50 timesteps. The controls are constrained in the ranges F ∈ [ 0 , 20 ] F\in[0,20] and τ x , τ y , τ z ∈ [ − 10 , 10 ] \tau_{x},\tau_{y},\tau_{z}\in[-10,10] . We use m = 1.0 m=1.0 kg for the mass of the quadrotor, I x = I z = I y = 1.0 I_{x}=I_{z}=I_{y}=1.0 for its moments, and g = 9.81 g=9.81 for the acceleration due to gravity. This leads to a nonlinear optimization problem with 812 variables, 400 inequality constraints, and 612 equality constraints.
+For generating the QP training data, we generate 500 QP subproblems by solving randomly generated quadrotor problems with SQP using OSQP as the QP solver.
+For evaluation, we generate 100 random quadrotor problems and solve them using SQP with OSQP or SQP with Deep FlexQP.
+Similar to the Dubins vehicle, each algorithm is allowed 50 SQP iterations and success in Figure 7 (left) is achieved when the infinity norm of the SQP residuals falls below the absolute convergence tolerance ε = 1 ​ e ​ − 2 \varepsilon=$110-2$ .
+Each QP solver runs until convergence of 1 ​ e ​ − 3 110-3 is reached, with a max budget of 10 seconds and an unlimited number of iterations.
+
+== H.2 Nonlinear Predictive Safety Filters ==
+
+Finally, we apply our proposed approach to accelerate a predictive safety filter for nonlinear model predictive control. These methods are based on control barrier functions (CBFs) ( ames2019control ) and filter a reference control u ref u^{\text{ref}} so that it better respects safety constraints ( wabersich2021predictive ) .
+The following optimization is solved at every MPC step:
+where β ∈ ( 0 , 1 ) \beta\in(0,1) is a parameter controlling the strength of the CBF constraint. This differs from Equation 62 because the discrete CBF constraint is defined between two consecutive states x t x_{t} and x t + 1 x_{t+1} rather than assuming the state constraints are separable across time. Our method improves upon the Shield-MPPI method proposed by yin2023shield because our optimization explicitly incorporates the dynamics and input constraints while also minimizing the discrepancy from the reference control trajectory. Furthermore, using our accelerated Deep FlexQP ensures that the optimization can be run fast enough for real-time control. We use a version of Deep FlexQP with performance guarantees from minimizing the generalization bound loss (see Appendix L ).
+
+== H.2.1 Shield-MPPI ==
+
+The method by yin2023shield approximately solves a nonlinear optimization at every MPC step to generate safe controls given a trajectory from a high-level planner such as a model predictive path integral (MPPI) controller.
+While the main motivation behind this approach is that it is computationally fast, unfortunately, there are a few flaws in that the method has no real guarantees of safety and that the MPPI trajectory is only used to warm-start this second optimization.
+The main bottleneck preventing us from solving a more complex optimization in real-time is the solver speed.
+Therefore, this is an application where accelerating optimizers using deep unfolding can shine.
+
+== H.2.2 Randomized Problem Scenarios ==
+
+We use the same Dubins vehicle model as in Section H.1.1 . 100 random scenarios are generated by first sampling a random initial and target state uniformly from 𝒰 ​ ( − x ¯ , x ¯ ) \mathcal{U}(-\bar{x},\bar{x}) , where x ¯ = ( 5 , 5 , π ) \bar{x}=(5,5,\pi) . An obstacle is randomly sampled so its position falls between the initial and target state with a random radius r r depending on the distance between the initial and target state: r ∼ 𝒰 ​ ( 0.01 , 2 ) ∗ max ⁡ ( | p x target − p x init | , | p y target − p y init | ) r\sim\mathcal{U}(0.01,2)*\max(|p_{x}^{\text{target}}-p_{x}^{\text{init}}|,|p_{y}^{\text{target}}-p_{y}^{\text{init}}|) . The controls are constrained in the ranges v ∈ [ − 10 , 10 ] v\in[-10,10] and ω ∈ [ − 5 , 5 ] \omega\in[-5,5] , enforced by clamping for Shield-MPPI and through the constraints of Equation 63 for our SQP-based method.
+The reference trajectory at every MPC step is given by running an MPPI controller that samples 10000 trajectories with a look-ahead horizon of 50 timesteps; with a dynamics discretization of Δ ​ t = 0.05 \Delta t=0.05 , this corresponds to a planning horizon of 2.5 seconds ahead. The system experiences zero-mean Gaussian disturbances in its state at every MPC step with standard deviation ( 0.05 , 0.05 , 0.01 ) (0.05,0.05,0.01) . Shield-MPPI is allowed to run up to 5 Gauss-Newton iterations per MPC step, while our SQP safety filter is allowed to run up to 5 SQP iterations per MPC step. These thresholds were determined by estimating the max number of iterations that would still allow for real-time control of the system.
+Collisions in Figure 7 (right) are counted if the state violates the CBF constraint (i.e., intersects the obstacle). Successes are counted if the vehicle reaches within a 0.1 radius of the target state. Figure 10 shows the problem setup and sample trajectories of our approach compared with Shield-MPPI.
+(a) Shield-MPPI
+(b) SQP Safety Filter — Deep FlexQP
+Figure 10 : Sample trajectories comparing safety filter approaches on a nonlinear car system. The vehicle receives disturbances in the positions and orientation at every step. Our approach more effectively recovers from unsafe scenarios by better accounting for dynamic feasibility and constraints.
+
+
+=== Appendix I Performance Comparisons — Small- to Medium-Scale QPs ===
+
+The vanilla and learned optimizers from Section 5.1 are benchmarked on 1000 test QPs from each problem class with the results summarized in Figure 12 .
+The best version of OSQP is found using a hyperparameter search over the following configurations: fixed parameters for all iterations, adaptive penalty parameters using the OSQP rule, or adaptive penalty parameters using the ADMM rule. Similarly, the best version of FlexQP is found using a hyperparameter search over the following configurations: fixed parameters for all iterations, adaptive penalty parameters using an OSQP-like rule, or adaptive penalty parameters using the ADMM rule.
+Problems are considered solved when the infinity norm of the QP residuals reaches below an absolute tolerance of ε = 1 ​ e ​ − 3 \varepsilon=$110-3$ . Optimizers are run with no limit on the number of iterations until a timeout of 1 second (1000 ms) is reached. Timings are compared using the normalized shifted geometric mean, which is the factor at which a specific solver is slower than the fastest one ( mittelmann2010benchmarks ) . We also compare the average number of iterations required to converge as well as the number of coefficient matrix factorizations required to converge to get a sense of where the optimizers are spending the most time. All methods use the direct method to solve their respective linear systems (i.e., equality-constrained QPs) at every iteration, and the factorization from the previous iteration is reused if the parameters have not changed by more than a factor of 5x following the heuristic used by OSQP ( stellato2020osqp ) .
+Key Takeaways:
+1. Deep FlexQP and Deep OSQP — Improved solve QPs 2-5x faster than OSQP .
+Deep FlexQP and Deep OSQP — Improved solve QPs 2-5x faster than OSQP .
+2. Deep FlexQP and Deep OSQP — Improved require upwards of 10x less iterations to converge than OSQP and require a comparable amount of matrix factorizations.
+Deep FlexQP and Deep OSQP — Improved require upwards of 10x less iterations to converge than OSQP and require a comparable amount of matrix factorizations.
+3. Deep OSQP — RLQP Parameterization struggles on problems with optimal control structure. This is not observed with Deep OSQP — Improved . Learning the ADMM relaxation parameter α \alpha seems to be crucial for these problems.
+Deep OSQP — RLQP Parameterization struggles on problems with optimal control structure. This is not observed with Deep OSQP — Improved . Learning the ADMM relaxation parameter α \alpha seems to be crucial for these problems.
+It is important to note that these results hold only when the direct method is used to solve the linear system. When using an indirect method such as the conjugate gradient (CG) method, converging in fewer iterations is actually a major benefit as each iteration across all the optimizers have roughly the same computational complexity (see Appendix B for discussion and Appendix J for results with the indirect method).
+(a) Random QPs
+(b) Random QPs with Equalities
+(c) Portfolio Optimization
+(d) Support Vector Machines
+(e) LASSO
+Figure 11 : Performance comparison of vanilla vs. learned optimizers. Legend: OSQP , FlexQP (Ours) , Deep OSQP , Deep OSQP — RLQP Parameterization , Deep OSQP — Improved , Deep FlexQP (Ours) .
+(a) Huber Fitting
+(b) Random Linear OCPs
+(c) Double Integrator
+(d) Oscillating Masses
+Figure 12 : Performance comparison of vanilla vs. learned optimizers. Legend: OSQP , FlexQP (Ours) , Deep OSQP , Deep OSQP — RLQP Parameterization , Deep OSQP — Improved , Deep FlexQP (Ours) .
+
+
+=== Appendix J Performance Comparisons — Large-Scale QPs ===
+
+In this section, we report the full details of the large-scale QP experiments introduced in Section 5.2 .
+Due to memory limitations, each optimizer is unfolded for 10 iterations and trained with a batch size of 1.
+Optimizers are trained for 5 epochs on 100 training problems and evaluated on 100 new test problems, with results presented in Figure 13 .
+Convergence is declared when the infinity norm of the QP residuals falls below an absolute tolerance of ε = 1 ​ e ​ − 3 \varepsilon=$110-3$ .
+Each optimizer is run until convergence or until a timeout of 10 minutes is reached.
+Similar to Appendix I , we report the normalized shifted geometric mean to better highlight the relative performance of each optimizer (wall clock times are provided in Figure 6 ).
+We also report the percent of problems solved, the average number of iterations taken to converge, and the average number of CG iterations necessary to solve the linear system at each ADMM iteration.
+For the optimizers that failed to converge on any problems, we report the average final QP residual infinity norms and average number of iterations run in Tables 2 and 3 .
+This gives a rough idea of how far away the optimizers were from converging when they were timed out.
+(a) Large-Scale Portfolio Optimization
+(b) Large-Scale Support Vector Machines
+Figure 13 : Performance comparison of vanilla vs. learned optimizers. Legend: OSQP , FlexQP (Ours) , Deep OSQP , Deep OSQP — RLQP Parameterization , Deep OSQP — Improved , Deep FlexQP (Ours) .
+From these results, we observe that the traditional optimizers ( OSQP and FlexQP ), failed to converge on any of the problems within the allotted time.
+Furthermore, while the fine-tuning procedure worked for all learned optimizers on the portfolio optimization problems, it appears to have failed for Deep OSQP and Deep OSQP — Improved on the SVM problems.
+Interestingly, the learned optimizers with the data-driven rules for the penalty parameters required many more CG iterations to solve their respective linear systems compared to the traditional optimizers.
+There seems to be a tradeoff between number of ADMM iterations required to converge vs. the condition number of the coefficient matrices generated at every ADMM iteration.
+For example, even though Deep FlexQP converges in relatively few iterations, each iteration required an order of magnitude more CG iterations compared to OSQP to solve the linear systems to a similar precision.
+Using preconditioning with the learned optimizers would likely lead to even greater performance gains over the traditional optimizers.
+Table 2 : Large-scale portfolio optimization failed optimizer statistics.
+Table 3 : Large-scale support vector machine failed optimizer statistics.
+
+
+=== Appendix K Sample Parameter Prediction Plots ===
+
+In this section, we compare the α \alpha , ρ I \rho_{I} , and ρ E \rho_{E} predictions across the traditional and learned optimizers on a few representative optimization problems from Section 5.1 .
+The parameters from the first 20 iterations of the different optimizers are shown in Figure 14 .
+Since Deep OSQP — RLQP Parameterization , Deep OSQP — Improved , and Deep FlexQP output vectors of penalty parameters ρ I \rho_{I} and ρ E \rho_{E} , we plot the mean prediction.
+Note that OSQP , FlexQP , and Deep OSQP — RLQP Parameterization use a fixed α \alpha of 1.6 1.6 , 1.6 1.6 , and 1.0 1.0 , respectively.
+We also report the infinity norm of the QP residuals to get a better idea of when during the optimization a prediction is being made.
+We observe that the learned rules seem to quickly adjust the parameters during the beginning of the optimization compared to the heuristic rules ( OSQP and FlexQP ), which seem to gradually adjust the parameters later in the optimization.
+Adjusting the parameters early might provide a beneficial effect on the convergence by allowing the optimizer to adjust to a better initial condition based on the first few evaluations of the problem residuals.
+(a) Portfolio Optimization
+(b) Huber Fitting
+(c) Linear OCPs
+Figure 14 : Representative parameter predictions for a few problem instances.
+
+
+=== Appendix L Supplementary Results for Generalization Bounds ===
+
+Figure 15 : Generalization bounds for Deep FlexQP trained on 500 oscillating masses QPs. Following Figure 4 , this is another case where the generalization bound using the loss Equation 13 is uninformative.
+We provide an overview of the generalization bounds training procedure described by saravanos2025deep , which in turn is adapted from the one described by majumdar2021pac . Let 𝒔 = ( P , q , G , h , A , b , x ∗ , y I ∗ , y E ∗ ) ∼ 𝒟 {\bm{s}}=(P,q,G,h,A,b,x^{*},y_{I}^{*},y_{E}^{*})\sim{\mathcal{D}} denote a single sample from data distribution 𝒟 {\mathcal{D}} and let 𝒮 = { 𝒔 i } i = 1 N {\mathcal{S}}=\{{\bm{s}}_{i}\}_{i=1}^{N} be a dataset of N N samples. Let ℓ ​ ( 𝒔 , θ ) ∈ [ 0 , 1 ] \ell({\bm{s}},\theta)\in[0,1] be a bounded loss for hypothesis θ ∼ 𝒫 \theta\sim{\mathcal{P}} . The true expected loss is defined as
+and the sample loss is
+We rely on the following PAC-Bayes bounds that hold with probability 1 − δ 1-\delta ( majumdar2021pac , Corollary 1) :
+where 𝔻 − 1 ( p | | c ) = sup { q ∈ [ 0 , 1 ] | 𝔻 K ​ L ( ℬ ( p ) | | ℬ ( q ) ≤ c } \mathbb{D}^{-1}(p\lvert\rvert c)=\sup\{q\in[0,1]|\mathbb{D}_{KL}({\mathcal{B}}(p)\lvert\rvert{\mathcal{B}}(q)\leq c\} is the inverse KL-divergence for Bernoulli random variables ℬ ​ ( p ) {\mathcal{B}}(p) and ℬ ​ ( q ) {\mathcal{B}}(q) . The first bound is tighter and is therefore useful for computing the generalization bounds as a numerical certificate of performance, while the second bound has the nice interpretation of a training loss plus a regularization term that depends on the size of the training set and penalizes being off from the prior 𝒫 0 {\mathcal{P}}_{0} . During training, we minimize the second bound using either the loss Equation 13 or Equation 14 .
+During the evaluation of the tighter generalization bound (after training is complete), since it is difficult to compute the expectation over θ ∼ 𝒫 \theta\sim{\mathcal{P}} in Equation 65 , we instead estimate the sample loss using a large number of samples { θ j } j = 1 M \{\theta_{j}\}_{j=1}^{M} from 𝒫 ∗ {\mathcal{P}}^{*} :
+The following sample convergence bound holds with probability 1 − δ ′ 1-\delta^{\prime} :
+Combining these bounds results in a final version of the PAC-Bayes bound that holds with probability 1 − δ − δ ′ 1-\delta-\delta^{\prime} ( majumdar2021pac ) :
+This is the final bound that we report in our experiments.
+The prior 𝒫 0 {\mathcal{P}}_{0} for all our models is a stochastic Deep FlexQP trained for 500 epochs on 500 QPs generated from the Random QPs with Equalities problem class using the supervised learning setup from Section 4 . We train Deep FlexQP for the generalization bound loss using either Equation 13 or Equation 14 with δ = 0.009 \delta=0.009 . We fix a training set for the generalization bounds using 500 problems from the class of interest and train the model for 1000 epochs. We evaluate Equation 69 using M = 10000 M=10000 model samples and δ ′ = 0.001 \delta^{\prime}=0.001 . Our bounds therefore hold with 99% probability. We report results comparing Equation 13 vs. Equation 14 for LASSO in Figure 4 and for Oscillating Masses in Figure 15 . The test loss is computed over 1000 new samples from the target problem class. Overall, the loss Equation 13 results in a less informative bound as it is above all the optimizers, even though the performance in practice can be much better.
+Figure 16 : Generalization bound for Deep FlexQP trained on 500 QP subproblems generated from the nonlinear predictive safety filter task.
+Finally, we train Deep FlexQP on 500 QP subproblems generated from a nonlinear predictive safety filter task described in Appendix H using the same procedure to minimize the generalization bound through the loss defined in Equation 14 . We use this Deep FlexQP as the QP solver for the predictive safety filter SQP approach described in Section H.2 . This provides a numerical certificate on the performance that would not hold for a traditional optimizer.
+
+
+=== Appendix M LSTM vs. MLP Policy Comparison ===
+
+This section presents an ablation analysis on the use of LSTMs to parameterize the policies in both Deep OSQP and Deep FlexQP.
+The use of LSTMs further leverages the analogy between deep-unfolded optimizers and RNNs, as discussed in monga2021algorithm .
+Our hypothesis is that the RNN hidden state can encode a compressed history or context from the past optimization variables and residuals, thereby leading to a better prediction of the algorithm parameters to apply at the current iteration.
+Using an MLP only provides access to information from the current iterate, which could lead to a myopic choice of parameters.
+Our results show that LSTMs enhance performance on several problem classes ( Figure 18 ).
+LSTMs appear to help the most on problems where the active constraints might switch suddenly from one iteration to the next.
+These types of problems include the machine learning ones, such as SVM, LASSO, and Huber fitting, as well as some of the control problems, like the oscillating masses.
+Figure 17 : Comparison of MLP vs. LSTM policies. Performance is compared over 1000 test problems.
+Figure 18 : Comparison of MLP vs. LSTM policies. Performance is averaged over 1000 test problems.
+
+
+=== Appendix N Ablation Analysis on the Use of Lagrange Multipliers in the Supervised Loss ===
+
+In Figure 20 , we compare the performance of Deep FlexQP on different problem classes using the optimality gap loss from Equation 11 and our proposed loss Equation 12 . It is evident that our loss including the Lagrange multipliers outperforms the optimality gap loss in all cases, except for the oscillating masses problem class. This could be simply due to the fact that the performance is already approacing 1 ​ e ​ − 10 110-10 at 20 iterations, and so small numerical differences play a bigger role. The overall increase in performance using the new loss can be explained by a stronger gradient signal given to Deep FlexQP to learn policies that ensure μ I ≥ ‖ y I ∗ ‖ ∞ \mu_{I}\geq\left\lVert y_{I}^{*}\right\rVert_{\infty} and μ E ≥ ‖ y E ∗ ‖ ∞ \mu_{E}\geq\left\lVert y_{E}^{*}\right\rVert_{\infty} .
+Surprisingly, however, the performance using both losses remains comparable. The ability of the optimality gap loss to perform nearly as well as the Lagrange multiplier loss likely stems from the coupling of μ I \mu_{I} with σ s , ρ I \sigma_{s},\rho_{I} and that of μ E \mu_{E} with ρ E \rho_{E} in the Deep FlexQP architecture. That is, even with a weaker gradient signal from the optimality gap loss, the respective networks are able to learn a shared representation that allows effective learning of the penalty parameters μ \mu as well.
+Figure 19 : Comparison on using the optimality gap vs. Lagrange multiplier loss for training Deep FlexQP. Performance is averaged over 1000 test problems.
+Figure 20 : Comparison on using the optimality gap vs. Lagrange multiplier loss for training Deep FlexQP. Performance is averaged over 1000 test problems.

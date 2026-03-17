@@ -296,3 +296,28 @@ body {
     color: #009;
     text-decoration: underline;
 }
+.paper_read {
+    opacity: 0.6;
+    background-color: #f5f5f5 !important;
+}
+.paper_read .rel_title a {
+    color: #666;
+}
+.rel_read {
+    font-size: 14px;
+    display: inline-block;
+    margin-right: 10px;
+}
+.rel_analyze {
+    font-size: 14px;
+    display: inline-block;
+    margin-right: 10px;
+}
+.rel_preprocess {
+    font-size: 14px;
+    display: inline-block;
+    margin-right: 10px;
+}
+.rel_preprocess a {
+    color: #070;
+}

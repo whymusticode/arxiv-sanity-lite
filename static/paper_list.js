@@ -25,6 +25,39 @@ const Paper = props => {
             .then(response => response.text())
             .then(text => console.log(text));
     };
+    const preprocess = () => {
+        console.log("Preprocessing paper " + p.id + " for LLM analysis...");
+        fetch("/preprocess/" + p.id)
+            .then(response => response.text())
+            .then(text => {
+                console.log(text);
+                alert("Done! Files:\n- clean_" + p.id + ".txt (full)\n- preprocessed_" + p.id + ".txt (reduced)");
+            });
+    };
+    const mark_read = (e) => {
+        fetch("/read/" + p.id)
+            .then(response => response.text())
+            .then(text => {
+                console.log(text);
+                p.is_read = true;
+                const paper_el = e.target.closest('.rel_paper');
+                paper_el.classList.add('paper_read');
+                e.target.textContent = 'mark unread';
+                e.target.onclick = mark_unread;
+            });
+    };
+    const mark_unread = (e) => {
+        fetch("/unread/" + p.id)
+            .then(response => response.text())
+            .then(text => {
+                console.log(text);
+                p.is_read = false;
+                const paper_el = e.target.closest('.rel_paper');
+                paper_el.classList.remove('paper_read');
+                e.target.textContent = 'mark read';
+                e.target.onclick = mark_read;
+            });
+    };
     const utags = p.utags.map((utxt, ix) => <UTag key={ix} tag={utxt} />);
     const similar_url = "/?rank=pid&pid=" + p.id;
     const inspect_url = "/inspect?pid=" + p.id;
@@ -40,9 +73,18 @@ const Paper = props => {
             </div>
         )
     }
+    // read/unread button for logged in users
+    const read_button = user ? (
+        p.is_read ?
+        <div class='rel_read'><a href="javascript:void(0)" onClick={mark_unread}>mark unread</a></div> :
+        <div class='rel_read'><a href="javascript:void(0)" onClick={mark_read}>mark read</a></div>
+    ) : null;
+
+    // add a class if the paper is read
+    const paper_class = 'rel_paper' + (p.is_read ? ' paper_read' : '');
 
     return (
-    <div class='rel_paper'>
+    <div class={paper_class}>
         <div class="rel_score">{p.weight.toFixed(2)}</div>
         <div class='rel_title'><a href={'http://arxiv.org/abs/' + p.id}>{p.title}</a></div>
         <div class='rel_authors'>{p.authors}</div>
@@ -54,6 +96,8 @@ const Paper = props => {
         <div class='rel_more'><a href={similar_url}>similar</a></div>
         <div class='rel_inspect'><a href={inspect_url}>inspect</a></div>
         <div class='rel_analyze'><a href="javascript:void(0)" onClick={analyzer}>analyze</a></div>
+        <div class='rel_preprocess'><a href="javascript:void(0)" onClick={preprocess}>preprocess</a></div>
+        {read_button}
     </div>
     )
 }
