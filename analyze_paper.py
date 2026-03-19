@@ -1,113 +1,122 @@
 #!/usr/bin/env python3
 """
-Analyze an arXiv paper using Claude API
+Analyze an arXiv paper using Claude API with intelligent preprocessing.
+Includes interactive REPL for follow-up questions.
+
 Usage: python3 analyze_paper.py <arxiv_url_or_id>
 Example: python3 analyze_paper.py https://arxiv.org/html/2510.18876v1
 Example: python3 analyze_paper.py 2510.18876
-
-TODO
-make it interactive so I can ask followup questions
-Semantic Chunking + Embedding-Based Retrieval
 """
-
-
-# def smart_truncate_with_embeddings(content, query, max_chars=200000):
-#     """Use embeddings to find most relevant sections"""
-    
-#     # Split into semantic chunks (paragraphs, sections)
-#     chunks = split_into_chunks(content, chunk_size=2000)
-    
-#     # Get embeddings for query and all chunks
-#     client = Anthropic(api_key=api_key)
-#     query_embedding = get_embedding(client, query)
-#     chunk_embeddings = [get_embedding(client, chunk) for chunk in chunks]
-    
-#     # Calculate similarity scores
-#     similarities = [cosine_similarity(query_embedding, ce) for ce in chunk_embeddings]
-    
-#     # Sort chunks by relevance and take top ones
-#     ranked_chunks = sorted(zip(chunks, similarities), key=lambda x: x[1], reverse=True)
-    
-#     selected_content = []
-#     current_length = 0
-#     for chunk, score in ranked_chunks:
-#         if current_length + len(chunk) > max_chars:
-#             break
-#         selected_content.append(chunk)
-#         current_length += len(chunk)
-    
-#     return "\n\n".join(selected_content)
-
-# def get_embedding(client, text):
-#     """Get embedding from Claude or use a dedicated embedding model"""
-#     # Note: You might want to use a dedicated embedding API like Voyage AI
-#     # which Anthropic recommends, or OpenAI's embedding API
-#     pass
-
-# def cosine_similarity(a, b):
-#     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
 
 import os
 import sys
-import requests
+from bs4 import BeautifulSoup
 from anthropic import Anthropic
-import numpy as np
 
-def extract_arxiv_id(url_or_id):
-    """Extract arxiv ID from URL or return the ID directly"""
-    if url_or_id.startswith('http'):
-        # Extract ID from URL
-        parts = url_or_id.split('/')
-        arxiv_id = parts[-1].replace('v1', '').replace('v2', '').replace('v3', '')
-        return arxiv_id
-    return url_or_id
+# Import only what we need from summarize_paper
+from summarize_paper import extract_arxiv_id, get_paper_html, extract_text_raw, count_tokens
 
-def get_paper_html(arxiv_id):
-    """Fetch the HTML version of the paper from arxiv"""
-    url = f"https://arxiv.org/html/{arxiv_id}v1"
-    print(f"Fetching paper from: {url}", file=sys.stderr)
+# Lock files for REPL signaling
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+REPL_ACTIVE_FILE = os.path.join(BASE_DIR, '.repl_active')
+REPL_STOP_FILE = os.path.join(BASE_DIR, '.repl_stop')
 
-    response = requests.get(url)
-    response.raise_for_status()
-    return response.text
 
-def truncate_content(content, max_chars=200000):
-    content_len = len(content)
-    if content_len <= max_chars:
-        return content
-    print(f"Truncating from {content_len} to {max_chars}")
-    truncated = content[:max_chars]
-    return truncated
-
-def analyze_with_claude(html_content, prompt):
-    """Send the paper HTML to Claude API with the prompt"""
-    # api_key = os.environ.get('ANTHROPIC_API_KEY')
-    with open('api_key.txt', 'r') as file:
-        api_key = file.read()
-
+def get_client():
+    """Get Anthropic client"""
+    with open(os.path.join(BASE_DIR, 'api_key.txt'), 'r') as file:
+        api_key = file.read().strip()
     if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY environment variable not set")
+        raise ValueError("API key not found in api_key.txt")
+    return Anthropic(api_key=api_key)
 
-    client = Anthropic(api_key=api_key)
-    html_content = truncate_content(html_content)
 
-    print("Sending to Claude API...", file=sys.stderr)
-# claude-sonnet-4-5-20250929
-# claude-haiku-4-5-20251001
-# claude-opus-4-1-20250805
-    message = client.messages.create(
-        model="claude-sonnet-4-5-20250929",
-        max_tokens=4096,
-        messages=[
-            {
+def should_stop_repl():
+    """Check if REPL should stop (another action triggered)"""
+    return os.path.exists(REPL_STOP_FILE)
+
+
+def cleanup_repl_files():
+    """Clean up REPL signal files"""
+    for f in [REPL_ACTIVE_FILE, REPL_STOP_FILE]:
+        if os.path.exists(f):
+            os.remove(f)
+
+
+def start_repl_session():
+    """Mark REPL as active"""
+    cleanup_repl_files()  # Clean up any stale files
+    with open(REPL_ACTIVE_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+
+
+def run_repl(client, paper_content, conversation_history):
+    """
+    Run interactive REPL for follow-up questions.
+    Exits when user types 'exit'/'quit' or another Flask action signals stop.
+    """
+    print("\n" + "="*80)
+    print("INTERACTIVE MODE - Ask follow-up questions about the paper")
+    print("Type 'exit' or 'quit' to end, or interact with the web UI")
+    print("="*80 + "\n")
+
+    start_repl_session()
+
+    try:
+        while True:
+            # Check for stop signal before prompting
+            if should_stop_repl():
+                print("[Another action detected - ending REPL]")
+                break
+
+            try:
+                user_input = input("You: ").strip()
+            except EOFError:
+                print("\nEnding interactive session.")
+                break
+
+            # Check stop signal after input too
+            if should_stop_repl():
+                print("[Another action detected - ending REPL]")
+                break
+
+            if not user_input:
+                continue
+
+            if user_input.lower() in ['exit', 'quit', 'q']:
+                print("Ending interactive session.")
+                break
+
+            # Add user message to history
+            conversation_history.append({
                 "role": "user",
-                "content": f"{prompt}\n\nHere is the paper HTML:\n\n{html_content}"
-            }
-        ]
-    )
+                "content": user_input
+            })
 
-    return message.content[0].text
+            # Send to Claude
+            print("Thinking...")
+            message = client.messages.create(
+                model="claude-sonnet-4-5-20250929",
+                max_tokens=4096,
+                system=f"You are analyzing an academic paper. Here is the preprocessed content:\n\n{paper_content}",
+                messages=conversation_history
+            )
+
+            response = message.content[0].text
+
+            # Add assistant response to history
+            conversation_history.append({
+                "role": "assistant",
+                "content": response
+            })
+
+            print(f"\nClaude: {response}\n")
+
+    except KeyboardInterrupt:
+        print("\n[Interrupted]")
+    finally:
+        cleanup_repl_files()
+
 
 def main():
     if len(sys.argv) < 2:
@@ -118,7 +127,7 @@ def main():
 
     # Load prompt from prompt.jinja
     try:
-        with open('prompt.jinja', 'r') as f:
+        with open(os.path.join(BASE_DIR, 'prompt.jinja'), 'r') as f:
             prompt = f.read().strip()
     except FileNotFoundError:
         print("Error: prompt.jinja not found", file=sys.stderr)
@@ -128,21 +137,59 @@ def main():
     arxiv_id = extract_arxiv_id(arxiv_input)
 
     try:
-        # Fetch paper HTML
+        # Fetch and do minimal preprocessing (just remove scripts/styles)
+        print("Fetching paper...", file=sys.stderr)
         html_content = get_paper_html(arxiv_id)
+        soup = BeautifulSoup(html_content, 'html.parser')
+        paper_content = extract_text_raw(soup)
+        token_count = count_tokens(paper_content)
+        print(f"Paper: {token_count} tokens", file=sys.stderr)
 
-        # Analyze with Claude
-        analysis = analyze_with_claude(html_content, prompt)
+        # Get Claude client
+        client = get_client()
+
+        # Initial analysis
+        print("Sending to Claude API...", file=sys.stderr)
+        message = client.messages.create(
+            model="claude-sonnet-4-5-20250929",
+            max_tokens=4096,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"{prompt}\n\nHere is the preprocessed paper:\n\n{paper_content}"
+                }
+            ]
+        )
+
+        initial_response = message.content[0].text
 
         # Print the result
         print("\n" + "="*80)
         print("CLAUDE ANALYSIS")
         print("="*80 + "\n")
-        print(analysis)
+        print(initial_response)
+
+        # Start conversation history for REPL
+        conversation_history = [
+            {
+                "role": "user",
+                "content": f"{prompt}\n\n[Paper content provided in system context]"
+            },
+            {
+                "role": "assistant",
+                "content": initial_response
+            }
+        ]
+
+        # Enter interactive REPL
+        run_repl(client, paper_content, conversation_history)
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

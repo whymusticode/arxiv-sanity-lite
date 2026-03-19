@@ -11,8 +11,11 @@ import os
 import re
 import sys
 import time
+import json
 import subprocess
+import requests
 from random import shuffle
+from datetime import datetime
 
 import numpy as np
 from sklearn import svm
@@ -29,6 +32,16 @@ from aslite.db import load_features
 # inits and globals
 
 RET_NUM = 25 # number of papers to return per page
+
+# REPL signal files
+REPL_ACTIVE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.repl_active')
+REPL_STOP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.repl_stop')
+
+def signal_repl_stop():
+    """Signal any running REPL to stop"""
+    if os.path.exists(REPL_ACTIVE_FILE):
+        with open(REPL_STOP_FILE, 'w') as f:
+            f.write('stop')
 
 app = Flask(__name__)
 
@@ -386,6 +399,7 @@ def about():
 
 @app.route('/add/<pid>/<tag>')
 def add(pid=None, tag=None):
+    signal_repl_stop()  # End any running REPL
     if g.user is None:
         return "error, not logged in"
     if tag == 'all':
@@ -415,6 +429,7 @@ def add(pid=None, tag=None):
 
 @app.route('/sub/<pid>/<tag>')
 def sub(pid=None, tag=None):
+    signal_repl_stop()  # End any running REPL
     if g.user is None:
         return "error, not logged in"
 
@@ -448,6 +463,7 @@ def sub(pid=None, tag=None):
 
 @app.route('/del/<tag>')
 def delete_tag(tag=None):
+    signal_repl_stop()  # End any running REPL
     if g.user is None:
         return "error, not logged in"
 
@@ -473,6 +489,7 @@ def delete_tag(tag=None):
 @app.route('/read/<pid>')
 def mark_read(pid):
     """Mark a paper as read"""
+    signal_repl_stop()  # End any running REPL
     if g.user is None:
         return "error, not logged in"
 
@@ -487,6 +504,7 @@ def mark_read(pid):
 @app.route('/unread/<pid>')
 def mark_unread(pid):
     """Mark a paper as unread"""
+    signal_repl_stop()  # End any running REPL
     if g.user is None:
         return "error, not logged in"
 
@@ -499,75 +517,104 @@ def mark_unread(pid):
     print(f"marked paper {pid} as unread for user {g.user}")
     return "ok: marked as unread"
 
+@app.route('/trending/<pid>')
+def trending(pid):
+    """
+    Fetch citation/trending data from Semantic Scholar API.
+    Returns citation count, influential citations, and recent citation velocity.
+    """
+    signal_repl_stop()
+
+    # Semantic Scholar API - get paper metrics
+    url = f"https://api.semanticscholar.org/graph/v1/paper/arXiv:{pid}"
+    params = {
+        'fields': 'citationCount,influentialCitationCount,citations.year,title'
+    }
+
+    # Retry with backoff for rate limiting
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+
+            if resp.status_code == 429:
+                wait_time = 2 ** attempt
+                print(f"Rate limited, waiting {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+
+            if resp.status_code == 404:
+                return "error: paper not found on Semantic Scholar"
+
+            resp.raise_for_status()
+            break
+        except requests.exceptions.RequestException as e:
+            if attempt == 2:
+                return f"error: {str(e)}"
+            time.sleep(1)
+    else:
+        return "error: rate limited, try again later"
+
+    try:
+        data = resp.json()
+
+        citation_count = data.get('citationCount', 0)
+        influential_count = data.get('influentialCitationCount', 0)
+
+        # Calculate recent citations (last 2 years) as "trending" signal
+        citations = data.get('citations', [])
+        current_year = datetime.now().year
+        recent_citations = sum(1 for c in citations if c.get('year') and c['year'] >= current_year - 1)
+
+        result = {
+            'pid': pid,
+            'title': data.get('title', ''),
+            'citations': citation_count,
+            'influential': influential_count,
+            'recent': recent_citations,  # Last 2 years
+        }
+
+        # Print to terminal
+        print(f"\n{'='*60}")
+        print(f"TRENDING DATA: {pid}")
+        print(f"  Total citations: {citation_count}")
+        print(f"  Influential: {influential_count}")
+        print(f"  Recent (last 2 yrs): {recent_citations}")
+        print(f"{'='*60}\n")
+
+        return json.dumps(result)
+
+    except Exception as e:
+        print(f"Error fetching trending data: {e}")
+        return f"error: {str(e)}"
+
 @app.route('/analyze/<pid>')
 def analyze(pid):
     """
-    Trigger Claude API analysis of a paper
-    Output goes to the terminal where flask is running
+    Trigger Claude API analysis of a paper.
+    Uses intelligent preprocessing and starts interactive REPL.
+    Output goes to the terminal where flask is running.
     """
+    signal_repl_stop()  # End any running REPL first
+    time.sleep(0.1)  # Brief pause to let previous REPL clean up
     print(f"\n{'='*80}")
     print(f"ANALYZING PAPER: {pid}")
     print(f"{'='*80}\n")
 
     try:
-        # Run the analyze_paper.py script
-        result = subprocess.run(
+        # Run the analyze_paper.py script with Popen (non-blocking)
+        # This lets the REPL run interactively while browser gets immediate response
+        subprocess.Popen(
             ['python3', 'analyze_paper.py', pid],
-            capture_output=False,  # Let output go to terminal
-            text=True,
-            cwd=os.path.dirname(os.path.abspath(__file__))
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            # Inherit stdin/stdout/stderr for interactive REPL
+            stdin=sys.stdin,
+            stdout=sys.stdout,
+            stderr=sys.stderr
         )
 
-        if result.returncode == 0:
-            return "ok: analysis printed to terminal"
-        else:
-            return f"error: script failed with code {result.returncode}"
+        return "ok: analysis started - see terminal for REPL"
     except Exception as e:
         print(f"Error running analysis: {e}")
-        return f"error: {str(e)}"
-
-@app.route('/preprocess/<pid>')
-def preprocess(pid):
-    """
-    Intelligently preprocess a paper for LLM analysis.
-    Removes cruft and reduces token count while preserving informative content.
-    Output saved to file in project root.
-    """
-    # Get optional target_tokens from query param (default 200k)
-    target_tokens = request.args.get('tokens', '200000')
-    try:
-        target_tokens = int(target_tokens)
-    except ValueError:
-        target_tokens = 200000
-
-    print(f"\n{'='*80}")
-    print(f"PREPROCESSING PAPER: {pid} (target: {target_tokens} tokens)")
-    print(f"{'='*80}\n")
-
-    try:
-        # Build command
-        cmd = ['python3', 'summarize_paper.py', pid, str(target_tokens)]
-
-        # Run the summarize_paper.py script
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=os.path.dirname(os.path.abspath(__file__))
-        )
-
-        # Print output to terminal
-        if result.stdout:
-            print(result.stdout)
-        if result.stderr:
-            print(result.stderr, file=sys.stderr)
-
-        if result.returncode == 0:
-            return f"ok: clean_{pid}.txt and preprocessed_{pid}.txt"
-        else:
-            return f"error: script failed with code {result.returncode}"
-    except Exception as e:
-        print(f"Error preprocessing: {e}")
         return f"error: {str(e)}"
 
 # -----------------------------------------------------------------------------

@@ -4,7 +4,7 @@
 
 # nearly 1k papers a day for all of arxiv 
 
-source ./.venv/bin/activate
+# source ./.venv/bin/activate
 
 cd ~/Documents/arxiv-sanity-lite
 

@@ -254,6 +254,14 @@ def remove_acknowledgments(soup):
     return soup
 
 
+def extract_text_raw(soup):
+    """Extract raw text from soup with minimal processing."""
+    # Just get all text, preserving basic structure
+    for tag in soup.find_all(['script', 'style']):
+        tag.decompose()
+    return soup.get_text(separator='\n', strip=True)
+
+
 def preprocess_paper(arxiv_id, target_tokens=200000):
     """
     Main preprocessing function. Intelligently reduces paper to target token count.
@@ -266,40 +274,39 @@ def preprocess_paper(arxiv_id, target_tokens=200000):
         tuple: (processed_text, token_count, output_filepath, stats)
     """
     arxiv_id = extract_arxiv_id(arxiv_id)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
 
     # Fetch paper
     html_content = get_paper_html(arxiv_id)
     original_size = len(html_content)
 
-    # Parse HTML
-    soup = BeautifulSoup(html_content, 'html.parser')
+    # Save RAW version first (minimal processing - just strip scripts/styles)
+    soup_raw = BeautifulSoup(html_content, 'html.parser')
+    raw_text = extract_text_raw(soup_raw)
+    raw_tokens = count_tokens(raw_text)
 
-    # Step 1: Remove HTML cruft
+    clean_filename = f"clean_{arxiv_id}.txt"
+    clean_filepath = os.path.join(base_dir, clean_filename)
+    with open(clean_filepath, 'w') as f:
+        f.write(f"Paper: {arxiv_id}\n")
+        f.write(f"Token count: {raw_tokens}\n")
+        f.write(f"Raw extraction (scripts/styles removed only)\n")
+        f.write("=" * 80 + "\n\n")
+        f.write(raw_text)
+
+    # Now do intelligent preprocessing
+    soup = BeautifulSoup(html_content, 'html.parser')
     soup = clean_html_cruft(soup)
     text = extract_text_clean(soup)
     tokens = count_tokens(text)
 
     stats = {
         'original_html_size': original_size,
+        'raw_tokens': raw_tokens,
         'after_cruft_removal': tokens,
-        'steps_applied': ['cruft_removal']
+        'steps_applied': ['cruft_removal'],
+        'clean_filepath': clean_filepath
     }
-
-    # Save the clean version (before any reduction) for reference
-    clean_text = text
-    clean_tokens = tokens
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    clean_filename = f"clean_{arxiv_id}.txt"
-    clean_filepath = os.path.join(base_dir, clean_filename)
-
-    with open(clean_filepath, 'w') as f:
-        f.write(f"Paper: {arxiv_id}\n")
-        f.write(f"Token count: {clean_tokens}\n")
-        f.write(f"This is the clean version (cruft removed, no reduction)\n")
-        f.write("=" * 80 + "\n\n")
-        f.write(clean_text)
-
-    stats['clean_filepath'] = clean_filepath
 
     # Step 2: If still over budget, compress references
     if tokens > target_tokens:
@@ -357,9 +364,8 @@ def preprocess_paper(arxiv_id, target_tokens=200000):
 
     with open(output_filepath, 'w') as f:
         f.write(f"Paper: {arxiv_id}\n")
-        f.write(f"Original HTML size: {stats['original_html_size']} chars\n")
-        f.write(f"Final token count: {stats['final_tokens']}\n")
-        f.write(f"Steps applied: {', '.join(stats['steps_applied'])}\n")
+        f.write(f"Raw tokens: {stats['raw_tokens']} -> Preprocessed: {stats['final_tokens']}\n")
+        f.write(f"Steps: {', '.join(stats['steps_applied'])}\n")
         f.write("=" * 80 + "\n\n")
         f.write(text)
 
@@ -384,9 +390,9 @@ def main():
         )
 
         print(f"\n{'='*80}")
-        print(f"PREPROCESSED - {token_count} tokens (target: {target_tokens})")
+        print(f"Raw: {stats.get('raw_tokens', '?')} tokens -> Preprocessed: {token_count} tokens")
         print(f"Steps: {', '.join(stats['steps_applied'])}")
-        print(f"Clean version: {stats.get('clean_filepath', 'N/A')}")
+        print(f"Clean (raw):   {stats.get('clean_filepath', 'N/A')}")
         print(f"Preprocessed:  {output_path}")
         print("=" * 80 + "\n")
 

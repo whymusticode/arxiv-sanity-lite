@@ -25,15 +25,6 @@ const Paper = props => {
             .then(response => response.text())
             .then(text => console.log(text));
     };
-    const preprocess = () => {
-        console.log("Preprocessing paper " + p.id + " for LLM analysis...");
-        fetch("/preprocess/" + p.id)
-            .then(response => response.text())
-            .then(text => {
-                console.log(text);
-                alert("Done! Files:\n- clean_" + p.id + ".txt (full)\n- preprocessed_" + p.id + ".txt (reduced)");
-            });
-    };
     const mark_read = (e) => {
         fetch("/read/" + p.id)
             .then(response => response.text())
@@ -96,7 +87,6 @@ const Paper = props => {
         <div class='rel_more'><a href={similar_url}>similar</a></div>
         <div class='rel_inspect'><a href={inspect_url}>inspect</a></div>
         <div class='rel_analyze'><a href="javascript:void(0)" onClick={analyzer}>analyze</a></div>
-        <div class='rel_preprocess'><a href="javascript:void(0)" onClick={preprocess}>preprocess</a></div>
         {read_button}
     </div>
     )
