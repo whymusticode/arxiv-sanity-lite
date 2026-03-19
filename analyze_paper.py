@@ -24,10 +24,9 @@ REPL_STOP_FILE = os.path.join(BASE_DIR, '.repl_stop')
 
 def get_client():
     """Get Anthropic client"""
-    with open(os.path.join(BASE_DIR, 'api_key.txt'), 'r') as file:
-        api_key = file.read().strip()
+    api_key = os.environ.get('ANTHROPIC_API_KEY')
     if not api_key:
-        raise ValueError("API key not found in api_key.txt")
+        raise ValueError("ANTHROPIC_API_KEY environment variable not set")
     return Anthropic(api_key=api_key)
 
 
